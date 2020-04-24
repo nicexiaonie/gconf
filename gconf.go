@@ -32,6 +32,9 @@ func New(c Config) (*viper.Viper, error) {
 
 		})
 	}
-	v.OnConfigChange(c.CallOnConfigChange)
+	if c.CallOnConfigChange != nil {
+		v.OnConfigChange(c.CallOnConfigChange)
+	}
+
 	return v, nil
 }
