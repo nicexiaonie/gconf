@@ -1,4 +1,40 @@
-.idea
-.git
-bin
-vendor
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.txt
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Compiled test binaries
+test/test_gconf
+
+# Config files (except examples)
+config.yaml
+config.json
+config.toml
+!example/config/*.yaml
+!example/config/*.json

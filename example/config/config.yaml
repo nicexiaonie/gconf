@@ -1,0 +1,39 @@
+# 示例配置文件
+app:
+  name: "GconfExample"
+  version: "1.0.0"
+  debug: false
+  features:
+    - "api"
+    - "admin"
+    - "monitoring"
+  metadata:
+    author: "gconf"
+    license: "MIT"
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  read_timeout: "30s"
+  write_timeout: "30s"
+
+database:
+  driver: "mysql"
+  host: "localhost"
+  port: 3306
+  username: "root"
+  password: "password"
+  database: "myapp"
+  max_conns: 100
+
+redis:
+  host: "localhost"
+  port: 6379
+  password: ""
+  db: 0
+
+log:
+  level: "info"
+  format: "json"
+  output: "stdout"
+
