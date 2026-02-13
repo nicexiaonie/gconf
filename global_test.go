@@ -2,14 +2,12 @@ package gconf
 
 import (
 	"os"
-	"sync"
 	"testing"
 )
 
 func TestInit(t *testing.T) {
 	// 重置全局实例
 	defaultInstance = nil
-	defaultInstanceOnce = sync.Once{}
 
 	err := Init(
 		WithConfigName("test"),
@@ -28,7 +26,6 @@ func TestInit(t *testing.T) {
 func TestGetInstance(t *testing.T) {
 	// 重置全局实例
 	defaultInstance = nil
-	defaultInstanceOnce = sync.Once{}
 
 	instance := GetInstance()
 	if instance == nil {
@@ -45,7 +42,6 @@ func TestGetInstance(t *testing.T) {
 func TestGlobalFunctions(t *testing.T) {
 	// 重置全局实例
 	defaultInstance = nil
-	defaultInstanceOnce = sync.Once{}
 
 	_ = Init()
 
@@ -75,7 +71,6 @@ func TestGlobalFunctions(t *testing.T) {
 func TestGlobalUnmarshal(t *testing.T) {
 	// 重置全局实例
 	defaultInstance = nil
-	defaultInstanceOnce = sync.Once{}
 
 	_ = Init()
 
@@ -104,7 +99,6 @@ func TestGlobalUnmarshal(t *testing.T) {
 func TestGlobalWithEnv(t *testing.T) {
 	// 重置全局实例
 	defaultInstance = nil
-	defaultInstanceOnce = sync.Once{}
 
 	os.Setenv("GLOBAL_TEST_KEY", "from_env")
 	defer os.Unsetenv("GLOBAL_TEST_KEY")
@@ -125,7 +119,6 @@ func TestGlobalWithEnv(t *testing.T) {
 func TestAllGlobalGetters(t *testing.T) {
 	// 重置全局实例
 	defaultInstance = nil
-	defaultInstanceOnce = sync.Once{}
 
 	_ = Init()
 
@@ -207,7 +200,6 @@ func TestAllGlobalGetters(t *testing.T) {
 func TestInitWithConfig(t *testing.T) {
 	// 重置全局实例
 	defaultInstance = nil
-	defaultInstanceOnce = sync.Once{}
 
 	// 第一次初始化
 	err := Init(WithConfigName("test1"))

@@ -8,25 +8,13 @@ import (
 
 var (
 	// defaultInstance 全局默认配置实例
-	defaultInstance     *Gconf
-	defaultInstanceOnce sync.Once
-	defaultInstanceMu   sync.RWMutex
+	defaultInstance   *Gconf
+	defaultInstanceMu sync.RWMutex
 )
 
 // Init 初始化全局配置实例（建议在应用启动时调用）
+// 可多次调用，每次调用都会用新的选项重新初始化，确保传入的配置生效
 func Init(opts ...Option) error {
-	var err error
-	defaultInstanceOnce.Do(func() {
-		defaultInstanceMu.Lock()
-		defer defaultInstanceMu.Unlock()
-		defaultInstance, err = New(opts...)
-	})
-	return err
-}
-
-// InitWithConfig 使用自定义配置初始化全局实例
-// 此方法允许在初始化后重新设置全局实例（慎用）
-func InitWithConfig(opts ...Option) error {
 	defaultInstanceMu.Lock()
 	defer defaultInstanceMu.Unlock()
 
@@ -38,14 +26,27 @@ func InitWithConfig(opts ...Option) error {
 	return nil
 }
 
+// InitWithConfig 使用自定义配置初始化全局实例（与 Init 行为一致，保持向后兼容）
+func InitWithConfig(opts ...Option) error {
+	return Init(opts...)
+}
+
 // GetInstance 获取全局配置实例
-// 如果未初始化，将使用默认配置自动初始化
+// 如果未调用 Init 进行初始化，将使用默认配置自动初始化
 func GetInstance() *Gconf {
-	if defaultInstance == nil {
-		_ = Init() // 使用默认配置初始化
-	}
 	defaultInstanceMu.RLock()
-	defer defaultInstanceMu.RUnlock()
+	if defaultInstance != nil {
+		defer defaultInstanceMu.RUnlock()
+		return defaultInstance
+	}
+	defaultInstanceMu.RUnlock()
+
+	// 双重检查锁定：仅在未初始化时使用默认配置兜底
+	defaultInstanceMu.Lock()
+	defer defaultInstanceMu.Unlock()
+	if defaultInstance == nil {
+		defaultInstance, _ = New()
+	}
 	return defaultInstance
 }
 
