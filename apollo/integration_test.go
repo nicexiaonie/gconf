@@ -43,7 +43,7 @@ func TestIntegrationApolloFormats(t *testing.T) {
 			st := syncer.Status()
 			t.Logf("status: source=%s hash=%s", st.Namespaces[0].Source, st.Namespaces[0].Hash)
 
-			path := filepath.Join(dir, "config.json", "config."+string(c.format))
+			path := filepath.Join(dir, "config."+string(c.format))
 			data, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatalf("read published file %s: %v", path, err)

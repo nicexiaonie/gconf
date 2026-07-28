@@ -16,13 +16,18 @@ import (
 
 // fileStore 实现 SnapshotStore：版本文件 + 稳定 symlink + LKG 索引。
 type fileStore struct {
-	root string
-	mu   sync.Mutex
-	hash map[string]string // namespace:format -> 当前已发布文件 hash
+	root      string
+	filenames map[string]string
+	mu        sync.Mutex
+	hash      map[string]string // namespace:format -> 当前已发布文件 hash
 }
 
-func newFileStore(root string) *fileStore {
-	return &fileStore{root: root, hash: make(map[string]string)}
+func newFileStore(root string, filenames ...map[string]string) *fileStore {
+	configured := make(map[string]string)
+	if len(filenames) > 0 {
+		configured = filenames[0]
+	}
+	return &fileStore{root: root, filenames: configured, hash: make(map[string]string)}
 }
 
 type nsIndex struct {
@@ -32,12 +37,20 @@ type nsIndex struct {
 	ReleaseKey string `json:"release_key"`
 }
 
-func (f *fileStore) namespaceDir(ns string) string {
-	return filepath.Join(f.root, ns)
+func (f *fileStore) metadataDir() string {
+	return filepath.Join(f.root, ".apollo")
 }
 
 func (f *fileStore) indexPath(ns string, format Format) string {
-	return filepath.Join(f.namespaceDir(ns), "index."+string(format)+".json")
+	return filepath.Join(f.metadataDir(), "index-"+hashBytes([]byte(nsKey(ns, format)))+".json")
+}
+
+func (f *fileStore) stablePath(ns string, format Format) string {
+	filename := f.filenames[nsKey(ns, format)]
+	if filename == "" {
+		filename = nsBase(ns) + "." + string(format)
+	}
+	return filepath.Join(f.root, filename)
 }
 
 func nsBase(ns string) string {
@@ -80,12 +93,12 @@ func (f *fileStore) Load(ns string, format Format) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	stable := filepath.Join(f.namespaceDir(ns), nsBase(ns)+"."+string(format))
+	stable := f.stablePath(ns, format)
 	target, err := os.Readlink(stable)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	data, err := os.ReadFile(filepath.Join(f.namespaceDir(ns), target))
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(stable), target))
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -125,8 +138,12 @@ func (f *fileStore) Publish(snap Snapshot, format Format) error {
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	dir := f.namespaceDir(snap.Namespace)
+	dir := f.root
 	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	metadataDir := f.metadataDir()
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
 		return err
 	}
 	if h, ok := f.hash[key]; ok && h == hash {
@@ -134,12 +151,12 @@ func (f *fileStore) Publish(snap Snapshot, format Format) error {
 		return f.writeIndex(snap.Namespace, format, idx)
 	}
 
-	snapDir := filepath.Join(dir, "snapshots")
+	snapDir := filepath.Join(metadataDir, "snapshots")
 	if err := os.MkdirAll(snapDir, 0o755); err != nil {
 		return err
 	}
 
-	base := nsBase(snap.Namespace)
+	base := strings.TrimSuffix(filepath.Base(f.stablePath(snap.Namespace, format)), filepath.Ext(f.stablePath(snap.Namespace, format)))
 	snapFile := fmt.Sprintf("%s-%s.%s", base, hash, formatStr)
 	snapPath := filepath.Join(snapDir, snapFile)
 	if err := os.WriteFile(snapPath, data, 0o644); err != nil {
@@ -154,10 +171,13 @@ func (f *fileStore) Publish(snap Snapshot, format Format) error {
 		}
 	}
 
-	stable := filepath.Join(dir, base+"."+formatStr)
+	stable := f.stablePath(snap.Namespace, format)
 	tmpLink := stable + ".tmp"
 	_ = os.Remove(tmpLink)
-	relTarget := filepath.Join("snapshots", snapFile)
+	relTarget, err := filepath.Rel(filepath.Dir(stable), snapPath)
+	if err != nil {
+		return err
+	}
 	if err := os.Symlink(relTarget, tmpLink); err != nil {
 		return err
 	}
@@ -209,7 +229,7 @@ func (f *fileStore) writeIndex(ns string, format Format, idx nsIndex) error {
 	if err := os.Rename(tmp, path); err != nil {
 		return err
 	}
-	return fsyncDir(f.namespaceDir(ns))
+	return fsyncDir(f.metadataDir())
 }
 
 func encode(values map[string]any, format Format) ([]byte, error) {

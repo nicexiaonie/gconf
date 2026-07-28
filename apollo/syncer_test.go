@@ -69,7 +69,7 @@ func newTestSyncer(t *testing.T, cfg Config, remote RemoteConfig) *Syncer {
 	return &Syncer{
 		cfg:     cfg,
 		remote:  remote,
-		store:   newFileStore(cfg.CacheDir),
+		store:   newFileStore(cfg.CacheDir, outputFilenames(cfg)),
 		status:  make(map[string]*NamespaceStatus),
 		lastNID: make(map[string]int64),
 	}
@@ -99,6 +99,53 @@ func TestSyncerMultiNamespace(t *testing.T) {
 	}
 	if _, err := readNSFile(dir, "ns2", "ns2.json"); err != nil {
 		t.Fatalf("ns2 not published: %v", err)
+	}
+}
+
+func TestSyncerCustomFilename(t *testing.T) {
+	dir := t.TempDir()
+	remote := newFakeRemote()
+	remote.snaps["config.json"] = Snapshot{Namespace: "config.json", Values: map[string]any{"k": "v"}}
+	cfg := Config{
+		AppID:      "app",
+		MetaServer: "http://x",
+		CacheDir:   dir,
+		Namespaces: []NamespaceConfig{{Name: "config.json", Format: FormatYAML, Filename: "application.yaml"}},
+	}
+	s := newTestSyncer(t, cfg, remote)
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := os.ReadFile(filepath.Join(dir, "application.yaml")); err != nil {
+		t.Fatalf("custom filename not published: %v", err)
+	}
+}
+
+func TestValidateFilename(t *testing.T) {
+	base := Config{
+		AppID:      "app",
+		MetaServer: "http://x",
+		CacheDir:   t.TempDir(),
+	}
+	tests := []struct {
+		name       string
+		namespaces []NamespaceConfig
+	}{
+		{name: "missing extension", namespaces: []NamespaceConfig{{Name: "ns", Format: FormatJSON, Filename: "config"}}},
+		{name: "extension mismatch", namespaces: []NamespaceConfig{{Name: "ns", Format: FormatJSON, Filename: "config.yaml"}}},
+		{name: "directory", namespaces: []NamespaceConfig{{Name: "ns", Format: FormatJSON, Filename: "sub/config.json"}}},
+		{name: "conflict", namespaces: []NamespaceConfig{{Name: "ns1", Format: FormatJSON, Filename: "config.json"}, {Name: "ns2", Format: FormatJSON, Filename: "config.json"}}},
+		{name: "duplicate namespace format", namespaces: []NamespaceConfig{{Name: "ns", Format: FormatJSON, Filename: "one.json"}, {Name: "ns", Format: FormatJSON, Filename: "two.json"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base
+			cfg.Namespaces = tt.namespaces
+			if _, err := New(cfg); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
 	}
 }
 
@@ -253,7 +300,7 @@ func TestSyncerCloseIdempotent(t *testing.T) {
 }
 
 func readNSFile(dir, ns, name string) ([]byte, error) {
-	return os.ReadFile(filepath.Join(dir, ns, name))
+	return os.ReadFile(filepath.Join(dir, name))
 }
 
 func waitForReleaseKey(s *Syncer, want string) bool {

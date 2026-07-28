@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -35,7 +37,7 @@ type NamespaceConfig struct {
 	Required bool
 	// Format 该 namespace 输出格式，空则用全局 Config.Format。
 	Format Format
-	// Filename 输出文件名（不含扩展名），空则用 Name。
+	// Filename 输出文件名（包含扩展名），空则根据 Name 和输出格式生成。
 	Filename string
 }
 
@@ -151,7 +153,7 @@ func New(cfg Config) (*Syncer, error) {
 	}
 	return &Syncer{
 		cfg:     cfg,
-		store:   newFileStore(cfg.CacheDir),
+		store:   newFileStore(cfg.CacheDir, outputFilenames(cfg)),
 		status:  make(map[string]*NamespaceStatus),
 		lastNID: make(map[string]int64),
 	}, nil
@@ -170,12 +172,55 @@ func validate(cfg Config) error {
 	if len(cfg.Namespaces) == 0 {
 		return fmt.Errorf("apollo: at least one namespace required")
 	}
+	outputs := make(map[string]string, len(cfg.Namespaces))
+	configured := make(map[string]struct{}, len(cfg.Namespaces))
 	for i, ns := range cfg.Namespaces {
 		if ns.Name == "" {
 			return fmt.Errorf("apollo: namespace[%d].Name required", i)
 		}
+		format := resolveFormat(ns, cfg.Format)
+		key := nsKey(ns.Name, format)
+		if _, ok := configured[key]; ok {
+			return fmt.Errorf("apollo: namespace %s with format %s configured more than once", ns.Name, format)
+		}
+		configured[key] = struct{}{}
+		filename, err := outputFilename(ns, format)
+		if err != nil {
+			return fmt.Errorf("apollo: namespace[%d].Filename: %w", i, err)
+		}
+		if previous, ok := outputs[filename]; ok {
+			return fmt.Errorf("apollo: output filename %q conflicts between %s and %s", filename, previous, ns.Name)
+		}
+		outputs[filename] = ns.Name
 	}
 	return nil
+}
+
+func outputFilenames(cfg Config) map[string]string {
+	filenames := make(map[string]string, len(cfg.Namespaces))
+	for _, ns := range cfg.Namespaces {
+		format := resolveFormat(ns, cfg.Format)
+		filename, _ := outputFilename(ns, format)
+		filenames[nsKey(ns.Name, format)] = filename
+	}
+	return filenames
+}
+
+func outputFilename(ns NamespaceConfig, format Format) (string, error) {
+	if ns.Filename == "" {
+		return nsBase(ns.Name) + "." + string(format), nil
+	}
+	if filepath.Base(ns.Filename) != ns.Filename || ns.Filename == "." || ns.Filename == ".." {
+		return "", fmt.Errorf("must be a file name without a directory")
+	}
+	ext := strings.TrimPrefix(filepath.Ext(ns.Filename), ".")
+	if ext == "" {
+		return "", fmt.Errorf("must include .%s extension", format)
+	}
+	if ext != string(format) {
+		return "", fmt.Errorf("extension .%s does not match format %s", ext, format)
+	}
+	return ns.Filename, nil
 }
 
 // resolveFormat 决定 namespace 的目标输出格式。

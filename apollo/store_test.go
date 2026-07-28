@@ -70,7 +70,7 @@ func TestStorePublishXMLIndented(t *testing.T) {
 	if err := s.Publish(snap, FormatXML); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "config.json", "config.xml"))
+	data, err := os.ReadFile(filepath.Join(dir, "config.xml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,12 +94,12 @@ func TestStoreSymlinkValid(t *testing.T) {
 	if err := s.Publish(snap, FormatJSON); err != nil {
 		t.Fatal(err)
 	}
-	stable := filepath.Join(dir, "ns", "ns.json")
+	stable := filepath.Join(dir, "ns.json")
 	target, err := os.Readlink(stable)
 	if err != nil {
 		t.Fatalf("readlink: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "ns", target)); err != nil {
+	if _, err := os.Stat(filepath.Join(filepath.Dir(stable), target)); err != nil {
 		t.Fatalf("symlink target invalid: %v", err)
 	}
 }
@@ -118,7 +118,7 @@ func TestStoreNewVersionDoesNotBreakOld(t *testing.T) {
 	if err := s.Publish(Snapshot{Namespace: "ns", Values: map[string]any{"k": "v1"}}, FormatJSON); err != nil {
 		t.Fatal(err)
 	}
-	stable := filepath.Join(dir, "ns", "ns.json")
+	stable := filepath.Join(dir, "ns.json")
 	first, _ := os.Readlink(stable)
 	if err := s.Publish(Snapshot{Namespace: "ns", Values: map[string]any{"k": "v2"}}, FormatJSON); err != nil {
 		t.Fatal(err)
@@ -128,7 +128,7 @@ func TestStoreNewVersionDoesNotBreakOld(t *testing.T) {
 		t.Fatalf("symlink not updated on new version")
 	}
 	// 旧版本文件仍存在
-	if _, err := os.Stat(filepath.Join(dir, "ns", first)); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, first)); err != nil {
 		t.Fatalf("old snapshot lost: %v", err)
 	}
 }
@@ -144,10 +144,19 @@ func TestStoreMultiFormatLKG(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, name := range []string{"index.yaml.json", "index.xml.json"} {
-		if _, err := os.Stat(filepath.Join(dir, "config.json", name)); err != nil {
-			t.Fatalf("missing %s: %v", name, err)
+	metadataDir := filepath.Join(dir, ".apollo")
+	entries, err := os.ReadDir(metadataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexCount := 0
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "index-") && strings.HasSuffix(entry.Name(), ".json") {
+			indexCount++
 		}
+	}
+	if indexCount != 2 {
+		t.Fatalf("index count: got=%d want=2", indexCount)
 	}
 
 	// 重建 store，模拟进程重启后分别恢复两种格式。
@@ -175,7 +184,7 @@ func TestStoreReleaseKeyOnlyUpdate(t *testing.T) {
 	if err := s.Publish(Snapshot{Namespace: "ns", Values: values, ReleaseKey: "r1"}, FormatJSON); err != nil {
 		t.Fatal(err)
 	}
-	stable := filepath.Join(dir, "ns", "ns.json")
+	stable := filepath.Join(dir, "ns.json")
 	firstTarget, err := os.Readlink(stable)
 	if err != nil {
 		t.Fatal(err)
@@ -204,13 +213,37 @@ func TestStoreReleaseKeyOnlyUpdate(t *testing.T) {
 	}
 }
 
+func TestStoreCustomFilename(t *testing.T) {
+	dir := t.TempDir()
+	filenames := map[string]string{nsKey("config.json", FormatYAML): "application.yaml"}
+	s := newFileStore(dir, filenames)
+	if err := s.Publish(Snapshot{Namespace: "config.json", Values: map[string]any{"k": "v"}}, FormatYAML); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "application.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "k: v") {
+		t.Fatalf("unexpected content: %s", data)
+	}
+	reloaded := newFileStore(dir, filenames)
+	loaded, err := reloaded.Load("config.json", FormatYAML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Values["k"] != "v" {
+		t.Fatalf("got %v", loaded.Values)
+	}
+}
+
 func TestStoreHashMatchesFileBytes(t *testing.T) {
 	dir := t.TempDir()
 	s := newFileStore(dir)
 	if err := s.Publish(Snapshot{Namespace: "config.json", Values: map[string]any{"k": "v"}}, FormatYAML); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "config.json", "config.yaml"))
+	data, err := os.ReadFile(filepath.Join(dir, "config.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}

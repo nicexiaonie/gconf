@@ -58,8 +58,8 @@ func main() {
 				for _, ns := range st.Namespaces {
 					fmt.Printf("  namespace=%s hash=%s\n", ns.Namespace, ns.Hash)
 				}
-				printFile(dir + "/config.json/config.yaml")
-				printFile(dir + "/config.json/config.xml")
+				printFile(dir + "/config.yaml")
+				printFile(dir + "/config.xml")
 			}
 		case s := <-sig:
 			fmt.Printf("\n收到信号 %v，退出\n", s)
