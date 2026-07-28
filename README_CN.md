@@ -879,6 +879,87 @@ func someHandler() {
 }
 ```
 
+## 🌐 Apollo 配置中心接入
+
+gconf 提供独立的可选子包 `apollo`，用于接入 Apollo 配置中心。该子包是**独立 Go module**，与 gconf 主 module 完全解耦：不引入子包时 gconf 行为与依赖完全不变。
+
+### 特性
+
+- 默认每个 Namespace 发布为一个独立的本地文件
+- 原子落盘（版本文件 + symlink + fsync），中断不留半文件
+- 基于 `releaseKey` / 内容 hash 去重，无变化不重复落盘
+- 本地最后有效快照（LKG）降级，Apollo 不可达时使用上一份配置启动
+- 业务用多个 `gconf.New` 实例分别读取各 Namespace 文件，无需改动 gconf 核心
+
+### 安装
+
+```bash
+go get github.com/nicexiaonie/gconf/apollo
+```
+
+引入 `apollo` 子包不会影响主 module 的依赖：主 module 的 `go.sum` 不含 Apollo SDK。
+
+### 快速开始
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+
+    "github.com/nicexiaonie/gconf"
+    "github.com/nicexiaonie/gconf/apollo"
+)
+
+func main() {
+    // 1. 启动 apollo 同步器，将远程配置发布到本地文件
+    syncer, err := apollo.New(apollo.Config{
+        AppID:      "my-app",
+        Cluster:    "default",
+        MetaServer: "http://apollo-meta:8080",
+        Secret:     "your-access-key",
+        CacheDir:   "/var/cache/apollo",
+        Watch:      true,
+        Format:     apollo.FormatJSON,
+        Namespaces: []apollo.NamespaceConfig{
+            {Name: "application", Required: true},
+            {Name: "datasource"},
+        },
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    if err := syncer.Start(context.Background()); err != nil {
+        log.Fatal(err)
+    }
+    defer syncer.Close()
+
+    // 2. 业务侧：为每个 Namespace 创建一个 gconf 实例读取本地文件
+    appConf, err := gconf.New(
+        gconf.WithConfigPaths("/var/cache/apollo/application"),
+        gconf.WithConfigName("application"),
+        gconf.WithConfigType("json"),
+        gconf.WithWatchConfig(true),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+    _ = appConf
+}
+```
+
+### 工作机制
+
+- `Start()` 始终执行首次同步；`Watch: true` 时在首次同步后持续监听 Apollo 变更，默认 `false`
+- `apollo` 子包从 Apollo 拉取配置，按 Namespace 原子写入本地文件
+- 同一个 Namespace 可配置多个目标格式，分别生成独立文件、hash、LKG 索引和状态
+- 内容 hash 是去重与完整性校验的主依据；`releaseKey` 仅用于发布追踪和排障
+- `gconf` 通过现有的本地文件读取与热更新能力消费配置；完整热更新需同时启用 Syncer `Watch` 和 `gconf.WithWatchConfig(true)`
+- 两者仅通过“本地文件 + 固定格式”契约耦合，互不 import
+
+详细配置项、降级行为、文件结构、状态查询与使用契约见 [apollo/README.md](apollo/README.md)。
+
 ## 🔍 支持的配置格式
 
 | 格式 | 扩展名 | 说明 |
@@ -933,7 +1014,7 @@ A: 优先级从高到低：
 
 ### Q: 支持远程配置中心吗？
 
-A: 目前基于 Viper，支持 etcd、Consul 等远程配置中心。可以通过 `GetViper()` 方法访问底层 Viper 实例进行高级配置。
+A: 支持。gconf 提供独立的可选子包 `apollo` 接入 Apollo 配置中心，作为独立 Go module 与主包解耦，默认每个 Namespace 发布为独立本地文件，由 gconf 读取。详见 [Apollo 配置中心接入](#-apollo-配置中心接入) 与 [apollo/README.md](apollo/README.md)。此外基于 Viper，也可通过 `GetViper()` 方法访问底层 Viper 实例使用 etcd、Consul 等远程配置中心。
 
 ## 🤝 贡献
 

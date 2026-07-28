@@ -607,6 +607,87 @@ gconf.Init(
 )
 ```
 
+## 🌐 Apollo Configuration Center
+
+gconf provides an optional `apollo` subpackage to integrate with Apollo Configuration Center. It is a **standalone Go module**, fully decoupled from the gconf main module: when not imported, gconf's behavior and dependencies remain unchanged.
+
+### Features
+
+- Each namespace is published as an independent local file by default
+- Atomic publishing (versioned file + symlink + fsync), no half-written files on interruption
+- Deduplication by `releaseKey` / content hash, no redundant writes when unchanged
+- Last-known-good (LKG) fallback: uses the previous valid config when Apollo is unreachable
+- Business code reads each namespace with a separate `gconf.New` instance, no changes to gconf core
+
+### Install
+
+```bash
+go get github.com/nicexiaonie/gconf/apollo
+```
+
+Importing the `apollo` subpackage does not affect the main module's dependencies: the main module's `go.sum` does not contain the Apollo SDK.
+
+### Quick Start
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+
+    "github.com/nicexiaonie/gconf"
+    "github.com/nicexiaonie/gconf/apollo"
+)
+
+func main() {
+    // 1. Start the apollo syncer to publish remote config to local files
+    syncer, err := apollo.New(apollo.Config{
+        AppID:      "my-app",
+        Cluster:    "default",
+        MetaServer: "http://apollo-meta:8080",
+        Secret:     "your-access-key",
+        CacheDir:   "/var/cache/apollo",
+        Watch:      true,
+        Format:     apollo.FormatJSON,
+        Namespaces: []apollo.NamespaceConfig{
+            {Name: "application", Required: true},
+            {Name: "datasource"},
+        },
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    if err := syncer.Start(context.Background()); err != nil {
+        log.Fatal(err)
+    }
+    defer syncer.Close()
+
+    // 2. Business side: create a gconf instance per namespace to read the local file
+    appConf, err := gconf.New(
+        gconf.WithConfigPaths("/var/cache/apollo/application"),
+        gconf.WithConfigName("application"),
+        gconf.WithConfigType("json"),
+        gconf.WithWatchConfig(true),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+    _ = appConf
+}
+```
+
+### How it works
+
+- `Start()` always performs the initial sync; with `Watch: true`, it continuously listens for Apollo changes after initial sync. The default is `false`.
+- The `apollo` module pulls config from Apollo and atomically writes local files per namespace.
+- One namespace may produce multiple target formats, each with its own file, hash, LKG index, and status entry.
+- Content hash is the primary deduplication and integrity key; `releaseKey` is auxiliary metadata for release tracing.
+- `gconf` consumes config using its existing local-file reading and hot-reload capabilities. End-to-end hot reload requires both Syncer `Watch` and `gconf.WithWatchConfig(true)`.
+- The modules are coupled only through the local-file contract, with no mutual imports.
+
+See [apollo/README.md](apollo/README.md) for full configuration, fallback behavior, file layout, status query, and usage contracts.
+
 ## 🔍 支持的配置格式
 
 - **YAML** - `config.yaml`, `config.yml`

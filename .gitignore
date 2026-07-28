@@ -38,3 +38,8 @@ config.json
 config.toml
 !example/config/*.yaml
 !example/config/*.json
+
+# Apollo demo runtime data
+apollo-demo-output/
+demo.log
+apollo/demo.log
