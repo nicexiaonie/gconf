@@ -240,7 +240,7 @@ func encode(values map[string]any, format Format) ([]byte, error) {
 	case FormatXML:
 		return mxj.Map(clean).XmlIndent("", "    ")
 	default:
-		return json.Marshal(clean)
+		return json.MarshalIndent(clean, "", "    ")
 	}
 }
 

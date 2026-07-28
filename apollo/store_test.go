@@ -26,6 +26,25 @@ func TestStorePublishAndLoad(t *testing.T) {
 	}
 }
 
+func TestStorePublishJSONIndented(t *testing.T) {
+	dir := t.TempDir()
+	s := newFileStore(dir)
+	snap := Snapshot{Namespace: "application", Values: map[string]any{
+		"app": map[string]any{"name": "demo", "version": "1.0.0"},
+	}}
+	if err := s.Publish(snap, FormatJSON); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "application.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "\n    \"app\": {") || !strings.Contains(content, "\n        \"name\": \"demo\"") {
+		t.Fatalf("json is not indented:\n%s", content)
+	}
+}
+
 func TestStorePublishDedup(t *testing.T) {
 	dir := t.TempDir()
 	s := newFileStore(dir)
