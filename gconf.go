@@ -13,7 +13,9 @@ import (
 
 // Gconf 配置管理器，封装 viper，提供更便捷的配置管理功能
 type Gconf struct {
-	viper            *viper.Viper
+	viper *viper.Viper
+	// viperMu 保护 viper 实例：读取加读锁，修改与重载加写锁（viper 本身不保证并发安全）
+	viperMu          sync.RWMutex
 	mu               sync.RWMutex
 	onChangeHandlers []func(fsnotify.Event)
 }
@@ -98,11 +100,26 @@ func New(opts ...Option) (*Gconf, error) {
 	}
 
 	// 设置配置监听
+	// viper 的 WatchConfig 会在其内部 goroutine 中直接重载自身，无法加锁，
+	// 因此由一个仅用于监听的影子 viper 感知文件变化，再在写锁内重载主实例
 	if options.WatchConfig {
-		g.viper.WatchConfig()
-		g.viper.OnConfigChange(func(e fsnotify.Event) {
+		watcher := viper.New()
+		for _, path := range options.ConfigPaths {
+			watcher.AddConfigPath(path)
+		}
+		watcher.SetConfigName(options.ConfigName)
+		if options.ConfigType != "" {
+			watcher.SetConfigType(options.ConfigType)
+		}
+		watcher.WatchConfig()
+		watcher.OnConfigChange(func(e fsnotify.Event) {
 			if options.Debug {
 				log.Printf("[gconf] 配置文件变化: %s, 操作: %s", e.Name, e.Op)
+			}
+
+			// 回调中通常会读取配置，必须在释放写锁后再执行回调
+			if err := g.ReadInConfig(); err != nil {
+				log.Printf("[gconf] 重新加载配置文件失败: %v", err)
 			}
 
 			// 执行自定义回调
@@ -199,176 +216,246 @@ func (g *Gconf) OnConfigChange(fn func(fsnotify.Event)) {
 
 // Get 获取配置值
 func (g *Gconf) Get(key string) interface{} {
+	g.viperMu.RLock()
+	defer g.viperMu.RUnlock()
 	return g.viper.Get(key)
 }
 
 // GetString 获取字符串类型配置
 func (g *Gconf) GetString(key string) string {
+	g.viperMu.RLock()
+	defer g.viperMu.RUnlock()
 	return g.viper.GetString(key)
 }
 
 // GetBool 获取布尔类型配置
 func (g *Gconf) GetBool(key string) bool {
+	g.viperMu.RLock()
+	defer g.viperMu.RUnlock()
 	return g.viper.GetBool(key)
 }
 
 // GetInt 获取整数类型配置
 func (g *Gconf) GetInt(key string) int {
+	g.viperMu.RLock()
+	defer g.viperMu.RUnlock()
 	return g.viper.GetInt(key)
 }
 
 // GetInt32 获取 int32 类型配置
 func (g *Gconf) GetInt32(key string) int32 {
+	g.viperMu.RLock()
+	defer g.viperMu.RUnlock()
 	return g.viper.GetInt32(key)
 }
 
 // GetInt64 获取 int64 类型配置
 func (g *Gconf) GetInt64(key string) int64 {
+	g.viperMu.RLock()
+	defer g.viperMu.RUnlock()
 	return g.viper.GetInt64(key)
 }
 
 // GetUint 获取无符号整数类型配置
 func (g *Gconf) GetUint(key string) uint {
+	g.viperMu.RLock()
+	defer g.viperMu.RUnlock()
 	return g.viper.GetUint(key)
 }
 
 // GetUint32 获取 uint32 类型配置
 func (g *Gconf) GetUint32(key string) uint32 {
+	g.viperMu.RLock()
+	defer g.viperMu.RUnlock()
 	return g.viper.GetUint32(key)
 }
 
 // GetUint64 获取 uint64 类型配置
 func (g *Gconf) GetUint64(key string) uint64 {
+	g.viperMu.RLock()
+	defer g.viperMu.RUnlock()
 	return g.viper.GetUint64(key)
 }
 
 // GetFloat64 获取浮点数类型配置
 func (g *Gconf) GetFloat64(key string) float64 {
+	g.viperMu.RLock()
+	defer g.viperMu.RUnlock()
 	return g.viper.GetFloat64(key)
 }
 
 // GetTime 获取时间类型配置
 func (g *Gconf) GetTime(key string) time.Time {
+	g.viperMu.RLock()
+	defer g.viperMu.RUnlock()
 	return g.viper.GetTime(key)
 }
 
 // GetDuration 获取时间间隔类型配置
 func (g *Gconf) GetDuration(key string) time.Duration {
+	g.viperMu.RLock()
+	defer g.viperMu.RUnlock()
 	return g.viper.GetDuration(key)
 }
 
 // GetStringSlice 获取字符串切片类型配置
 func (g *Gconf) GetStringSlice(key string) []string {
+	g.viperMu.RLock()
+	defer g.viperMu.RUnlock()
 	return g.viper.GetStringSlice(key)
 }
 
 // GetStringMap 获取字符串映射类型配置
 func (g *Gconf) GetStringMap(key string) map[string]interface{} {
+	g.viperMu.RLock()
+	defer g.viperMu.RUnlock()
 	return g.viper.GetStringMap(key)
 }
 
 // GetStringMapString 获取字符串到字符串映射类型配置
 func (g *Gconf) GetStringMapString(key string) map[string]string {
+	g.viperMu.RLock()
+	defer g.viperMu.RUnlock()
 	return g.viper.GetStringMapString(key)
 }
 
 // GetStringMapStringSlice 获取字符串到字符串切片映射类型配置
 func (g *Gconf) GetStringMapStringSlice(key string) map[string][]string {
+	g.viperMu.RLock()
+	defer g.viperMu.RUnlock()
 	return g.viper.GetStringMapStringSlice(key)
 }
 
 // GetSizeInBytes 获取字节大小类型配置（支持 KB, MB, GB 等）
 func (g *Gconf) GetSizeInBytes(key string) uint {
+	g.viperMu.RLock()
+	defer g.viperMu.RUnlock()
 	return g.viper.GetSizeInBytes(key)
 }
 
 // Set 设置配置值
 func (g *Gconf) Set(key string, value interface{}) {
+	g.viperMu.Lock()
+	defer g.viperMu.Unlock()
 	g.viper.Set(key, value)
 }
 
 // SetDefault 设置默认值
 func (g *Gconf) SetDefault(key string, value interface{}) {
+	g.viperMu.Lock()
+	defer g.viperMu.Unlock()
 	g.viper.SetDefault(key, value)
 }
 
 // IsSet 检查配置键是否存在
 func (g *Gconf) IsSet(key string) bool {
+	g.viperMu.RLock()
+	defer g.viperMu.RUnlock()
 	return g.viper.IsSet(key)
 }
 
 // AllKeys 获取所有配置键
 func (g *Gconf) AllKeys() []string {
+	g.viperMu.RLock()
+	defer g.viperMu.RUnlock()
 	return g.viper.AllKeys()
 }
 
 // AllSettings 获取所有配置
 func (g *Gconf) AllSettings() map[string]interface{} {
+	g.viperMu.RLock()
+	defer g.viperMu.RUnlock()
 	return g.viper.AllSettings()
 }
 
 // Unmarshal 将配置解析到结构体
 func (g *Gconf) Unmarshal(rawVal interface{}) error {
+	g.viperMu.RLock()
+	defer g.viperMu.RUnlock()
 	return g.viper.Unmarshal(rawVal)
 }
 
 // UnmarshalKey 将指定键的配置解析到结构体
 func (g *Gconf) UnmarshalKey(key string, rawVal interface{}) error {
+	g.viperMu.RLock()
+	defer g.viperMu.RUnlock()
 	return g.viper.UnmarshalKey(key, rawVal)
 }
 
 // UnmarshalExact 严格解析配置到结构体（结构体中未定义的字段会报错）
 func (g *Gconf) UnmarshalExact(rawVal interface{}) error {
+	g.viperMu.RLock()
+	defer g.viperMu.RUnlock()
 	return g.viper.UnmarshalExact(rawVal)
 }
 
 // WriteConfig 写入配置到文件
 func (g *Gconf) WriteConfig() error {
+	g.viperMu.Lock()
+	defer g.viperMu.Unlock()
 	return g.viper.WriteConfig()
 }
 
 // SafeWriteConfig 安全写入配置（文件存在时不覆盖）
 func (g *Gconf) SafeWriteConfig() error {
+	g.viperMu.Lock()
+	defer g.viperMu.Unlock()
 	return g.viper.SafeWriteConfig()
 }
 
 // WriteConfigAs 写入配置到指定文件
 func (g *Gconf) WriteConfigAs(filename string) error {
+	g.viperMu.Lock()
+	defer g.viperMu.Unlock()
 	return g.viper.WriteConfigAs(filename)
 }
 
 // SafeWriteConfigAs 安全写入配置到指定文件（文件存在时不覆盖）
 func (g *Gconf) SafeWriteConfigAs(filename string) error {
+	g.viperMu.Lock()
+	defer g.viperMu.Unlock()
 	return g.viper.SafeWriteConfigAs(filename)
 }
 
 // ReadInConfig 重新读取配置文件
 func (g *Gconf) ReadInConfig() error {
+	g.viperMu.Lock()
+	defer g.viperMu.Unlock()
 	return g.viper.ReadInConfig()
 }
 
 // MergeInConfig 合并配置文件
 func (g *Gconf) MergeInConfig() error {
+	g.viperMu.Lock()
+	defer g.viperMu.Unlock()
 	return g.viper.MergeInConfig()
 }
 
 // ConfigFileUsed 获取当前使用的配置文件路径
 func (g *Gconf) ConfigFileUsed() string {
+	g.viperMu.RLock()
+	defer g.viperMu.RUnlock()
 	return g.viper.ConfigFileUsed()
 }
 
 // BindEnv 绑定环境变量到配置键
 func (g *Gconf) BindEnv(keys ...string) error {
+	g.viperMu.Lock()
+	defer g.viperMu.Unlock()
 	return g.viper.BindEnv(keys...)
 }
 
 // RegisterAlias 注册配置键别名
 func (g *Gconf) RegisterAlias(alias string, key string) {
+	g.viperMu.Lock()
+	defer g.viperMu.Unlock()
 	g.viper.RegisterAlias(alias, key)
 }
 
 // Sub 获取子配置树
 func (g *Gconf) Sub(key string) *Gconf {
+	g.viperMu.RLock()
+	defer g.viperMu.RUnlock()
 	subViper := g.viper.Sub(key)
 	if subViper == nil {
 		return nil
@@ -380,6 +467,7 @@ func (g *Gconf) Sub(key string) *Gconf {
 }
 
 // GetViper 获取底层的 viper 实例（用于高级操作）
+// 注意：直接操作返回的实例会绕过 gconf 的锁，与热更新并发时不保证安全
 func (g *Gconf) GetViper() *viper.Viper {
 	return g.viper
 }

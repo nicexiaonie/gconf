@@ -23,7 +23,7 @@
 - 🔌 **灵活配置** - 使用 Options 模式，配置灵活简洁
 - 🌐 **全局实例** - 提供单例模式的全局配置访问
 - ⚡ **高性能** - 基于 Viper，性能卓越
-- 🔒 **线程安全** - 内置并发安全机制
+- 🔒 **线程安全** - 配置读写与热更新重载之间并发安全
 
 ## 📦 安装
 
@@ -321,6 +321,14 @@ conf.OnConfigChange(func(e fsnotify.Event) {
 })
 ```
 
+**热更新的并发语义：**
+
+- 配置重载在 gconf 内部的写锁中完成，重载期间的读取要么得到完整的旧配置，要么得到完整的新配置，不会读到新旧混合的数据
+- 回调在重载完成后执行，回调中通过 `Get`、`Unmarshal` 等方法读取到的已是新配置
+- `WithOnConfigChange` 设置的回调同步执行；`OnConfigChange` 注册的回调各自在独立的 goroutine 中执行
+- 重载失败（如文件格式错误）时保留原有配置，并输出错误日志
+- 回调中把配置解析到业务变量时，该变量的并发访问需自行同步，参见下文最佳实践「配置热更新处理」
+
 ### 写入配置文件
 
 ```go
@@ -385,6 +393,8 @@ err := conf.ReadInConfig()
 viper := conf.GetViper()
 // 使用 viper 的高级功能
 ```
+
+> ⚠️ 直接操作返回的 viper 实例会绕过 gconf 的锁，与热更新并发时不保证安全。
 
 #### 调试
 
@@ -588,23 +598,47 @@ if err := validate.Struct(config); err != nil {
 
 ### 4. 配置热更新处理
 
+gconf 保证自身读取的并发安全，但回调中更新的业务配置变量需要自行同步：先解析到新对象，再整体替换，读取方通过读锁获取。
+
 ```go
-var config AppConfig
+type ConfigManager struct {
+    mu     sync.RWMutex
+    config *AppConfig
+}
+
+func (cm *ConfigManager) Get() *AppConfig {
+    cm.mu.RLock()
+    defer cm.mu.RUnlock()
+    return cm.config
+}
+
+func (cm *ConfigManager) Update(newConfig *AppConfig) {
+    cm.mu.Lock()
+    defer cm.mu.Unlock()
+    cm.config = newConfig
+}
+
+var configManager = &ConfigManager{}
 
 gconf.Init(
     gconf.WithWatchConfig(true),
     gconf.WithOnConfigChange(func(e fsnotify.Event) {
-        // 重新加载配置
-        if err := gconf.Unmarshal(&config); err != nil {
+        // 解析到新对象，避免修改正在被其他协程读取的配置
+        var newConfig AppConfig
+        if err := gconf.Unmarshal(&newConfig); err != nil {
             log.Printf("重新加载配置失败: %v", err)
             return
         }
+        configManager.Update(&newConfig)
         log.Println("配置已热更新")
-        
+
         // 执行相应的更新操作
-        updateComponents(&config)
+        updateComponents(&newConfig)
     }),
 )
+
+// 业务代码中读取
+config := configManager.Get()
 ```
 
 ## 🌐 Apollo Configuration Center

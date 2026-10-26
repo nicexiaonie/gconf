@@ -1,7 +1,11 @@
 package gconf
 
 import (
+	"fmt"
+	"io/ioutil"
 	"os"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -282,6 +286,75 @@ func TestOptions(t *testing.T) {
 	}
 	if conf == nil {
 		t.Fatal("配置实例不应为 nil")
+	}
+}
+
+// TestConcurrentReadDuringReload 验证热更新重载与并发读写之间没有数据竞争（需配合 -race 运行）
+func TestConcurrentReadDuringReload(t *testing.T) {
+	dir, err := ioutil.TempDir("", "gconf-race")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	file := filepath.Join(dir, "config.yaml")
+	if err := ioutil.WriteFile(file, []byte("app:\n  version: 0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	conf, err := New(
+		WithConfigPaths(dir),
+		WithConfigName("config"),
+		WithConfigType("yaml"),
+		WithWatchConfig(true),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	worker := func(fn func(i int)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+					fn(i)
+				}
+			}
+		}()
+	}
+	worker(func(int) { conf.GetInt("app.version") })
+	worker(func(int) {
+		var c struct {
+			App struct{ Version int }
+		}
+		_ = conf.Unmarshal(&c)
+	})
+	worker(func(i int) { conf.Set("runtime.counter", i) })
+
+	const last = 20
+	for i := 1; i <= last; i++ {
+		content := fmt.Sprintf("app:\n  version: %d\n", i)
+		if err := ioutil.WriteFile(file, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for conf.GetInt("app.version") != last && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	close(stop)
+	wg.Wait()
+
+	if v := conf.GetInt("app.version"); v != last {
+		t.Errorf("热更新未生效：期望 %d，得到 %d", last, v)
 	}
 }
 
