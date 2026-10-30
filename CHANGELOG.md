@@ -2,7 +2,9 @@
 
 本文档记录了 Gconf 的所有重要变更。
 
-## [Unreleased]
+## [1.1.0] - 2026-10-30
+
+主包 `v1.1.0`，Apollo 子包 `apollo/v1.1.0`。
 
 ### 变更 🔧
 
@@ -49,6 +51,12 @@
 - **修复带点的 properties 型 Namespace（如 `TEST1.redis`）无法同步**
   - 此前名称含点即视为文件型；现与 Apollo/agollo 一致，仅已知格式后缀视为文件型
   - 此类 Namespace 的输出文件名保留完整名称，例如 `TEST1.redis.properties`
+
+### 文档 📚
+
+- 按当前实现重写 `README.md`、`apollo/README.md`、`QUICKSTART.md`，删除与 `README.md` 重复的 `README_CN.md`
+- 修正 apollo 本地目录结构与 gconf 读取路径的错误描述，注明 gconf 不支持读取 XML、`Merge`/`Retry` 当前无效果
+- 修正 QUICKSTART 中错误的配置优先级（`Set()` 高于环境变量）及不存在的包级函数 `GetDuration`、`GetTime`
 
 ### 测试 🧪
 

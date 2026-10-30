@@ -1,78 +1,56 @@
 # Apollo 配置同步模块
 
-`github.com/nicexiaonie/gconf/apollo` 是 gconf 的可选 Apollo 配置中心同步模块。它作为**独立 Go module** 发布，与 gconf 主 module 互不依赖，仅通过本地配置文件协作。
+`github.com/nicexiaonie/gconf/apollo` 是 gconf 的可选 Apollo 配置中心同步模块。它作为**独立 Go module** 发布，与 gconf 主 module 互不依赖，仅通过本地配置文件协作：本模块负责从 Apollo 拉取配置并可靠写入本地文件，业务程序再用 gconf 读取。
 
-该模块负责从 Apollo 拉取配置、按配置原样或转换格式后可靠落盘；业务程序再使用 gconf 读取本地文件。未引入本模块时，gconf 的依赖和行为均不发生变化。
+## 目录
+
+- [功能概览](#功能概览)
+- [安装](#安装)
+- [快速开始](#快速开始)
+- [配置说明](#配置说明)
+- [Namespace 类型](#namespace-类型)
+- [落地规则](#落地规则)
+- [格式转换](#格式转换)
+- [输出文件名](#输出文件名)
+- [配置校验](#配置校验)
+- [启动与错误处理](#启动与错误处理)
+- [热更新](#热更新)
+- [本地目录结构](#本地目录结构)
+- [与 gconf 集成](#与-gconf-集成)
+- [Status 状态查询](#status-状态查询)
+- [生命周期](#生命周期)
+- [安全与运维](#安全与运维)
+- [常见问题](#常见问题)
+- [已知限制](#已知限制)
 
 ## 功能概览
 
-- 按 Namespace 拉取 Apollo 完整配置
-- 默认每个 Namespace 独立发布、独立降级
-- 可选热更新，默认关闭
-- 未配置目标格式时原样落地：文件型写 Apollo 原文，properties 型写为 properties 文件
-- 支持同一 Namespace 同时输出多种格式
-- 支持转换为 JSON、YAML、YML、XML、TOML、properties
-- TXT 与带 `.properties` 后缀的文件型 Namespace 只能原样落地
-- 版本文件、稳定 symlink 和索引均采用原子发布策略
-- 使用目标文件 SHA-256 去重，无内容变化时不重复生成配置版本
-- 保存 Apollo `releaseKey`，用于发布追踪和故障排查
-- 支持 LKG（Last Known Good，最后一次已知有效配置）降级启动
-- 提供 `Status()` 查询同步来源、目标格式、文件 hash、releaseKey 和最近错误
+- 按 Namespace 拉取 Apollo 完整配置，每个输出项独立发布、独立降级
+- **原样落地**：未配置目标格式时，文件型 Namespace 写入 Apollo 原文，properties 型 Namespace 写为 properties 文件
+- **格式转换**：可转换为 JSON、YAML、YML、XML、TOML、properties；无法表达的内容报错，不做自动修正
+- 同一 Namespace 可同时输出多种格式
+- 原子发布：版本文件 + 稳定 symlink + fsync，中断不会留下半写文件
+- 按目标文件 SHA-256 去重，内容未变化时不生成新版本
+- LKG（Last Known Good，最后一次已知有效配置）降级启动
+- 可选持续热更新，默认关闭
+- `Status()` 查询同步来源、目标格式、文件 hash、releaseKey 与最近错误
 
-> 多 Namespace 合并为单文件的 `Merge` 模式当前尚未实现。默认且推荐的方式是每个 Namespace 独立发布。
-
-## 运行架构
-
-```text
-Apollo Config Service
-        │
-        │ 首次拉取 / HTTP 长轮询变更通知
-        ▼
-apollo Syncer
-  ├─ 原样落地：校验原文可解析（可关闭）
-  ├─ 转换落地：解析原文并转换为目标格式
-  ├─ 计算目标文件 SHA-256
-  ├─ 写入版本文件并 fsync
-  ├─ 原子切换稳定 symlink
-  └─ 写入格式独立的 LKG 索引
-        │
-        ▼
-本地配置文件
-        │
-        │ gconf + fsnotify
-        ▼
-业务程序
-```
-
-同步模块和 gconf 各自负责不同边界：
-
-| 组件 | 职责 |
-|---|---|
-| Apollo 服务端 | 配置管理、发布和变更通知 |
-| apollo Syncer | 远端同步、格式转换、去重、原子落盘和 LKG |
-| gconf | 本地文件读取、类型转换、环境变量覆盖和文件热重载 |
-| 业务程序 | 配置语义校验、结构体快照切换和资源重建 |
-
-## 环境要求与安装
-
-- Go 1.20 或更高版本
-- 可访问的 Apollo Meta Server 或 Config Service
+## 安装
 
 ```bash
 go get github.com/nicexiaonie/gconf/apollo
 ```
 
-模块边界：
-
-- `apollo/` 自带 `go.mod`
-- Apollo SDK 和 XML 转换依赖只存在于 apollo module
-- gconf 主 module 不 import apollo，主 module 的 `go.sum` 不包含 agollo 和 mxj
+- 要求 Go 1.20 及以上
+- 依赖 Apollo 官方 Go SDK [agollo](https://github.com/apolloconfig/agollo) v5
+- 需要可访问的 Apollo Meta Server 或 Config Service
+- 依赖只存在于本模块，gconf 主 module 的 `go.sum` 不包含 agollo
 
 ## 快速开始
 
 ### 仅首次同步
 
-`Watch` 默认是 `false`。以下配置只在 `Start()` 时拉取并落盘一次：
+`Watch` 默认为 `false`，以下配置只在 `Start()` 时拉取并落盘一次：
 
 ```go
 syncer, err := apollo.New(apollo.Config{
@@ -81,23 +59,22 @@ syncer, err := apollo.New(apollo.Config{
     MetaServer: "http://apollo-meta:8080",
     CacheDir:   "/var/lib/my-app/apollo",
     Namespaces: []apollo.NamespaceConfig{
-        // 未配置 Format：原样落地为 application.properties
+        // 未配置 Format：原样落地为 /var/lib/my-app/apollo/application.properties
         {Name: "application", Required: true},
     },
 })
 if err != nil {
     return err
 }
-
 if err := syncer.Start(context.Background()); err != nil {
     return err
 }
 defer syncer.Close()
 ```
 
-### 启用持续热更新
+### 持续热更新
 
-设置 `Watch: true` 后，`Start()` 会先完成首次同步，再注册 Apollo 变更监听：
+设置 `Watch: true` 后，`Start()` 先完成首次同步，再注册 Apollo 变更监听：
 
 ```go
 syncer, err := apollo.New(apollo.Config{
@@ -107,20 +84,13 @@ syncer, err := apollo.New(apollo.Config{
     CacheDir:   "/var/lib/my-app/apollo",
     Watch:      true,
     Namespaces: []apollo.NamespaceConfig{
-        {Name: "config.json", Required: true, Format: apollo.FormatYAML},
+        // config.json 转换为 TOML，落地为 /var/lib/my-app/apollo/config.toml
+        {Name: "config.json", Required: true, Format: apollo.FormatTOML},
     },
 })
-if err != nil {
-    return err
-}
-
-if err := syncer.Start(context.Background()); err != nil {
-    return err
-}
-defer syncer.Close()
 ```
 
-`Start()` 返回成功后，热更新已运行，不需要调用其他同步方法。调用 `Close()` 后停止监听并关闭 Apollo 客户端。
+`Start()` 返回成功后热更新已在运行，无需调用其他同步方法。
 
 ## 配置说明
 
@@ -129,478 +99,371 @@ defer syncer.Close()
 | 字段 | 必填 | 默认值 | 说明 |
 |---|---:|---|---|
 | `AppID` | 是 | — | Apollo 应用 ID |
-| `Cluster` | 否 | 空 | Apollo 集群名称，常用值为 `default` |
+| `Cluster` | 否 | 空 | Apollo 集群名称，通常为 `default` |
 | `MetaServer` | 是 | — | Apollo Meta Server 或 Config Service 地址 |
-| `Secret` | 否 | 空 | Apollo AccessKey Secret，仅用于请求签名；不会加密本地文件 |
-| `CacheDir` | 是 | — | 配置快照、稳定文件和 LKG 索引的持久化根目录 |
-| `Namespaces` | 是 | — | 至少配置一个 Namespace 输出项 |
-| `Watch` | 否 | `false` | 是否在首次同步后持续监听 Apollo 变更 |
-| `Merge` | 否 | `false` | 多 Namespace 合并开关；当前尚未实现 |
-| `Retry` | 否 | 零值 | 预留重试配置；当前尚未接入同步流程 |
+| `Secret` | 否 | 空 | Apollo AccessKey Secret，仅用于请求签名，不加密本地文件 |
+| `CacheDir` | 是 | — | 输出文件、版本文件与 LKG 索引的持久化根目录 |
+| `Namespaces` | 是 | — | 输出项列表，至少一个 |
+| `Watch` | 否 | `false` | 首次同步后是否持续监听 Apollo 变更 |
+| `Merge` | 否 | `false` | 预留字段，**当前无任何效果**，设置为 `true` 也不会报错 |
+| `Retry` | 否 | 零值 | 预留字段，**当前无任何效果** |
 
 ### `NamespaceConfig`
+
+每个 `NamespaceConfig` 是一个输出项，同一 Namespace 可配置多个输出项以输出多种格式。
 
 | 字段 | 必填 | 默认值 | 说明 |
 |---|---:|---|---|
 | `Name` | 是 | — | Apollo Namespace 名称 |
-| `Required` | 否 | `false` | 远端不可用且该目标格式没有 LKG 时，是否使 `Start()` 失败 |
+| `Required` | 否 | `false` | Apollo 不可用且没有 LKG 时，是否让 `Start()` 失败，见 [启动与错误处理](#启动与错误处理) |
 | `Format` | 否 | 空 | 目标格式。为空或与源格式相同时原样落地；与源格式不同时解析后转换 |
-| `Filename` | 否 | 空 | 输出文件名，严格按配置写入，不校验扩展名；为空时由 Namespace 基名和目标格式生成 |
-| `SkipValidate` | 否 | `false` | 原样落地前跳过解析检查；仅适用于原样落地，与转换同时配置会校验失败 |
+| `Filename` | 否 | 空 | 输出文件名，严格按配置写入，不校验扩展名；为空时自动生成，见 [输出文件名](#输出文件名) |
+| `SkipValidate` | 否 | `false` | 原样落地前跳过解析检查；仅适用于原样落地 |
 
-### `Required` 的准确语义
+### 格式常量
 
-`Required` 只影响**首次启动时没有可用配置**的情况：
+```go
+apollo.FormatJSON       // json
+apollo.FormatYAML       // yaml
+apollo.FormatYML        // yml，内容同 YAML
+apollo.FormatXML        // xml
+apollo.FormatTOML       // toml，仅作为转换目标
+apollo.FormatProperties // properties
+apollo.FormatTXT        // txt，仅适用于原样落地
+```
 
-| 远端配置 | 对应格式 LKG | `Required` | 结果 |
-|---|---|---:|---|
-| 成功 | 任意 | 任意 | 使用远端配置，`Start()` 成功 |
-| 失败 | 存在且有效 | 任意 | 使用 LKG 降级，`Start()` 成功 |
-| 失败 | 不存在 | `false` | 状态为 `empty`，`Start()` 继续 |
-| 失败 | 不存在 | `true` | `Start()` 返回错误 |
+## Namespace 类型
 
-同一个 Namespace 输出 YAML 和 XML 时，两个格式分别维护 LKG；其中一个格式没有 LKG，不代表另一个格式也不可用。
+Apollo 的 Namespace 分为两类，本模块按名称后缀区分，规则与 Apollo 及 agollo 一致：
 
-以上仅针对远端不可用。**配置内容错误**（原文无法解析、转换失败）属于人为配置问题，首次启动时无论 `Required` 与 LKG 如何，`Start()` 都返回错误，且不会覆盖已有文件；运行中热更新遇到内容错误时不写入，错误记录在 `Status().LastError`。
+| 类型 | 判断规则 | 示例 | 从 Apollo 取得的内容 |
+|---|---|---|---|
+| 文件型 | 名称后缀为 `.json`、`.yaml`、`.yml`、`.xml`、`.txt`、`.properties` 之一 | `config.json`、`rules.yaml`、`notice.txt` | 整段原文 |
+| properties 型 | 其余所有名称，包括带点但后缀不是上述格式的名称 | `application`、`TEST1.redis` | 一组键值对 |
 
-## Namespace 与格式规则
+- 文件型的**源格式**为名称后缀，properties 型的源格式为 `properties`
+- 公共 Namespace 常带部门前缀（如 `TEST1.redis`），仍属于 properties 型
+- properties 型在 Apollo 中逐项存储，不存在原文；落地时按 key 排序写出，Apollo 后台中的配置项顺序与备注不会保留
 
-### Apollo Namespace 类型
-
-Apollo 中：
-
-- properties 型 Namespace 通常没有格式后缀，例如 `application`
-- 文件型 Namespace 使用名称加后缀，例如 `config.json`、`rules.yaml`、`mapping.xml`、`notice.txt`
-
-模块根据 Namespace 后缀识别源格式，规则与 Apollo/agollo 一致：仅 `.json`、`.yaml`、`.yml`、`.xml`、`.txt`、`.properties` 视为文件型；其余带点名称（如公共 Namespace 的部门前缀 `TEST1.redis`）按 properties 型处理，输出文件名保留完整名称，例如 `TEST1.redis.properties`。
-
-### 落地规则
+## 落地规则
 
 | 配置 | 落地方式 |
 |---|---|
-| 未配置 `Format`，或与源格式相同 | **原样落地**：文件型写 Apollo 原文（注释、顺序均保留）；properties 型按 key 排序写为 `key=value` |
-| 配置了与源格式不同的 `Format` | **转换落地**：解析原文后按目标格式生成 |
+| 未配置 `Format`，或 `Format` 与源格式相同 | **原样落地** |
+| `Format` 与源格式不同 | **转换落地** |
 
-原样落地前默认检查原文能否按源格式解析（JSON/YAML/YML/XML），失败则不写入并报错；`SkipValidate: true` 时跳过检查，原文照写，问题由读取方暴露。TXT 与带 `.properties` 后缀的文件型 Namespace 不做检查。
+### 原样落地
 
-### 可转换的源与目标
+| 源 | 写入内容 |
+|---|---|
+| 文件型 | Apollo 原文，逐字节一致，注释、key 顺序、缩进均保留 |
+| properties 型 | 按 key 排序的 `key=value` 文件，必要时按 properties 规则转义 |
 
-| 源 Namespace | 原样落地格式 | 可转换为 |
+写入前默认按源格式检查原文能否解析：
+
+| 源格式 | 默认检查 | `SkipValidate: true` |
 |---|---|---|
-| properties 型（无后缀或非格式后缀） | properties | JSON、YAML、YML、XML、TOML |
-| `.json` / `.yaml` / `.yml` / `.xml` | 源格式 | JSON、YAML、YML、XML、TOML、properties |
+| JSON、YAML、YML、XML | 解析失败则不写入并报错 | 跳过检查，原文照写，问题由读取方暴露 |
+| TXT、`.properties` 文件型 | 不检查 | 不检查 |
+| properties 型 | 写出后逐项读回比对，不一致则报错 | 同左 |
+
+### 转换落地
+
+解析源内容后按目标格式生成，并验证生成结果能按目标格式解析回来。规则见 [格式转换](#格式转换)。
+
+## 格式转换
+
+### 源与目标
+
+| 源 | 原样落地格式 | 可转换为 |
+|---|---|---|
+| properties 型 | properties | JSON、YAML、YML、XML、TOML |
+| `.json`、`.yaml`、`.yml`、`.xml` | 源格式 | JSON、YAML、YML、XML、TOML、properties |
 | `.txt` | txt | 不可转换 |
 | `.properties` 文件型 | properties | 不可转换 |
 
-```go
-apollo.FormatJSON       // .json
-apollo.FormatYAML       // .yaml
-apollo.FormatYML        // .yml
-apollo.FormatXML        // .xml
-apollo.FormatTOML       // .toml
-apollo.FormatProperties // .properties
-apollo.FormatTXT        // .txt，仅适用于原样落地
-```
-
-例如：
-
-```go
-Namespaces: []apollo.NamespaceConfig{
-    // config.json 原样落地为 config.json
-    {Name: "config.json"},
-
-    // config.json 转换为 TOML，落地为 config.toml
-    {Name: "config.json", Format: apollo.FormatTOML},
-
-    // application 原样落地为 application.properties
-    {Name: "application"},
-
-    // application 转换为 YAML，并自定义文件名
-    {Name: "application", Format: apollo.FormatYAML, Filename: "app.yaml"},
-}
-```
-
-非法组合在 `New()` 时直接报错：未知目标格式、TXT/`.properties` 文件型配置转换、转换为 TXT、转换时配置 `SkipValidate`。
-
 ### 转换限制
 
-转换遇到目标格式无法表达的内容时报错，不做任何自动修正：
+遇到目标格式无法表达的内容时报错，不做任何自动修正：
 
 | 目标格式 | 报错的情况 |
 |---|---|
-| TOML | `null`；数组元素类型不一致（包括整数与小数混合）；超出 int64 的整数 |
-| properties | 数组；`null`；嵌套展开后 key 重复；key 含 `=` 等无法正确读回的字符 |
+| TOML | `null`；数组元素类型不一致（包括整数与小数混合）；超出 int64 范围的整数 |
+| properties | 数组；`null`；嵌套展开后 key 重复；key 含 `=` 等写出后无法正确读回的字符 |
 
-JSON 源按原文区分整数与小数：`8080` 保持整数，大整数不丢精度。
+### 转换细节
 
-### 文件名
-
-未配置 `Filename` 时，文件名为 Namespace 去掉格式后缀后加目标格式扩展名，例如 `config.json` 转 TOML 为 `config.toml`，`TEST1.redis` 原样落地为 `TEST1.redis.properties`。
-
-配置 `Filename` 时严格按配置写入，不校验扩展名与内容是否一致；只要求不含目录且多个输出项不重名。扩展名与内容不一致或无扩展名时，gconf 需通过 `WithConfigType` 指定类型，否则可能读不到配置。
-
-### XML 转换约定
-
-XML 必须存在单一根节点。结构化 map 转为 XML 时，多个顶层字段会被包装在 `<doc>` 根节点下，并以四个空格缩进输出：
+- **JSON 数字**：按原文区分整数与小数，`8080` 保持整数，大整数不丢精度
+- **properties 展开**：嵌套对象展开为点分 key，如 `{"server": {"port": 8080}}` 写为 `server.port=8080`
+- **properties 型的值**：Apollo 中的值均为字符串，转换为 JSON、YAML 等格式后仍是字符串
+- **XML 根节点**：XML 只能有一个根节点。只有一个顶层 key 时以该 key 为根；多个顶层 key 时以 `<doc>` 包装：
 
 ```xml
 <doc>
-    <app>
-        <name>demo</name>
-    </app>
+    <a>1</a>
+    <b>2</b>
 </doc>
 ```
 
-XML 再由 gconf/Viper 读取时，应根据实际解析结构确认根节点路径。
+- **注释**：转换落地基于解析后的数据重新生成，原文中的注释与 key 顺序不保留
 
-## 同一 Namespace 输出多种格式
+## 输出文件名
 
-同一个远端 Namespace 只订阅一次，但可以配置多个输出项：
-
-```go
-Namespaces: []apollo.NamespaceConfig{
-    {Name: "config.json", Required: true, Format: apollo.FormatYAML},
-    {Name: "config.json", Required: true, Format: apollo.FormatXML},
-},
-```
-
-首次同步和每次热更新都会从同一份结构化配置生成：
-
-```text
-<CacheDir>/config.json/config.yaml
-<CacheDir>/config.json/config.xml
-```
-
-每种目标格式独立维护：
-
-- 目标文件 hash
-- 稳定 symlink
-- 版本文件
-- LKG 索引
-- `Status()` 状态项
-
-## 本地目录与文件契约
-
-以 `config.json` 同时输出 YAML 和 XML 为例：
-
-```text
-<CacheDir>/
-  config.json/
-    config.yaml -> snapshots/config-<yaml-hash>.yaml
-    config.xml  -> snapshots/config-<xml-hash>.xml
-    index.yaml.json
-    index.xml.json
-    snapshots/
-      config-<yaml-hash>.yaml
-      config-<xml-hash>.xml
-```
-
-各文件用途：
-
-| 文件 | 用途 |
+| 配置 | 文件名 |
 |---|---|
-| `config.yaml` / `config.xml` | 业务读取的稳定路径；是指向当前有效版本的 symlink |
-| `snapshots/*` | 不可变完整版本文件；文件名包含目标文件 SHA-256 |
-| `index.<format>.json` | 对应格式的 LKG 元数据，记录 hash、format 和 releaseKey |
+| 未配置 `Filename` | Namespace 名去掉格式后缀，加目标格式扩展名 |
+| 配置了 `Filename` | 严格按配置写入，不校验扩展名与内容是否一致 |
 
-`CacheDir` 是持久化目录，不是进程内的易失缓存。进程退出不会自动删除；只有外部删除、临时目录清理或容器文件系统重建才会丢失。
+自动生成示例：
 
-容器部署时应把 `CacheDir` 挂载到持久卷，否则 Pod 重建后无法使用 LKG。
+| Namespace | `Format` | 文件名 |
+|---|---|---|
+| `application` | 空 | `application.properties` |
+| `TEST1.redis` | 空 | `TEST1.redis.properties` |
+| `config.json` | 空 | `config.json` |
+| `config.json` | `FormatTOML` | `config.toml` |
+| `rules.yml` | 空 | `rules.yml` |
 
-### 原子发布顺序
+配置 `Filename` 时的约束：
 
-内容变化时：
+- 只能是文件名，不能包含目录，不能是 `.` 或 `..`
+- 所有输出项写入同一个 `CacheDir`，文件名不能重复
 
-1. 生成目标文件内容：原样落地取原文并按需检查解析；转换落地解析、转换并验证可解析回来
-2. 计算实际目标文件字节的 SHA-256
-3. 写入不可变版本文件
-4. 对版本文件执行 fsync
-5. 使用临时 symlink + rename 原子切换稳定路径
-6. fsync Namespace 目录
-7. 使用临时文件 + rename 原子更新格式索引
+扩展名与内容不一致或没有扩展名时，gconf 需要通过 `WithConfigType` 指定类型，否则读不到配置。
 
-内容 hash 不变、仅 releaseKey 改变时：
+## 配置校验
 
-- 不创建新版本文件
-- 不切换稳定 symlink
-- 只更新对应格式的 LKG 索引和状态
+`New()` 只校验配置、不连接 Apollo。以下情况直接返回错误：
 
-## LKG 降级
+| 校验项 | 示例 |
+|---|---|
+| `AppID`、`MetaServer`、`CacheDir` 为空 | — |
+| 未配置 Namespace，或 `Name` 为空 | — |
+| 未知目标格式 | `Format: "ini"` |
+| TXT 或 `.properties` 文件型配置转换 | `{Name: "notice.txt", Format: FormatJSON}` |
+| 转换为 TXT | `{Name: "config.json", Format: FormatTXT}` |
+| 配置转换的同时设置 `SkipValidate` | `{Name: "config.json", Format: FormatTOML, SkipValidate: true}` |
+| 同一 Namespace 的同一目标格式重复配置 | 两个 `{Name: "config.json", Format: FormatYAML}` |
+| `Filename` 含目录 | `Filename: "../config.json"` |
+| 多个输出项文件名重复 | 两个输出项都生成 `config.yaml` |
 
-LKG 是 Last Known Good，即“最后一次已知有效配置”。它由当前稳定文件、版本文件和格式索引共同组成。
+## 启动与错误处理
 
-启动时，每个 `Namespace + Format` 独立执行：
+### 错误分类
+
+| 错误类型 | 示例 | `Start()` 时 | 热更新时 |
+|---|---|---|---|
+| 配置内容错误 | 原文无法解析；转换遇到无法表达的内容 | **一律失败**，与 `Required`、LKG 无关；不覆盖已有文件 | 不写入，记录到 `LastError` |
+| Apollo 不可用 | 网络故障、Namespace 不存在 | 按下表 `Required` 与 LKG 决定 | 不处理，保留当前文件 |
+| 本地写入失败 | 磁盘满、无权限 | 按下表 `Required` 与 LKG 决定 | 记录到 `LastError` |
+
+配置内容错误是人为发布的错误配置，在启动阶段暴露，由人修正 Apollo 上的配置。
+
+### `Required` 与 LKG
+
+仅适用于 Apollo 不可用与本地写入失败：
+
+| 远端配置 | 该输出项的 LKG | `Required` | 结果 |
+|---|---|---:|---|
+| 成功 | 任意 | 任意 | 使用远端配置，`Source=remote` |
+| 失败 | 存在且有效 | 任意 | 使用 LKG 降级，`Source=lkg`，`Start()` 成功 |
+| 失败 | 不存在 | `false` | `Source=empty`，`Start()` 继续 |
+| 失败 | 不存在 | `true` | `Start()` 返回错误 |
+
+LKG 按输出项独立维护：同一 Namespace 输出 YAML 和 XML 时，一个格式没有 LKG 不影响另一个格式。
+
+### 启动流程
 
 ```text
-读取对应格式 LKG
-  ├─ 存在且 hash 校验通过：作为降级候选
-  └─ 不存在或校验失败：无降级候选
-        ↓
-拉取 Apollo 最新配置
-  ├─ 成功且内容有效：发布远端配置，Source=remote
-  ├─ 成功但内容错误：不写入，Start() 返回错误（与 LKG、Required 无关）
-  ├─ 失败且有 LKG：保留 LKG，Source=lkg
-  └─ 失败且无 LKG：Source=empty，按 Required 决定是否报错
+对每个输出项：
+  读取该输出项的 LKG
+    ├─ 存在且 hash 校验通过：作为降级候选，Source=lkg
+    └─ 不存在或校验失败：Source=empty
+  拉取 Apollo 配置
+    ├─ 失败：按 Required 与 LKG 决定是否报错
+    └─ 成功：生成落地内容
+          ├─ 内容错误：Start() 返回错误，不写入
+          └─ 成功：原子发布，Source=remote
 ```
 
-LKG 保证可用性，不保证配置一定是最新版本。关键安全策略、计费规则等不能长期使用旧值的配置，应由业务增加最大陈旧时间和告警策略。
+LKG 只校验文件完整性（hash），不解析内容。LKG 保证可用性，不保证配置是最新的；对陈旧配置敏感的业务应自行增加最大陈旧时间与告警。
 
 ## 热更新
-
-### Syncer 热更新
 
 `Watch: true` 时：
 
 1. `Start()` 完成首次同步
 2. 注册 agollo 变更监听
-3. Apollo 发布后，agollo 长轮询收到通知
-4. listener 获取完整 Namespace 快照及当前 releaseKey
-5. 串行 worker 处理变更
-6. 为所有同名输出项分别转换、去重和原子落盘
+3. Apollo 发布后，agollo 收到完整 Namespace 快照及 releaseKey
+4. 变更进入串行队列，由单个 worker 处理
+5. 为该 Namespace 的所有输出项分别生成内容、去重并原子发布
 
-`Watch: false` 时只执行首次同步，后续 Apollo 发布不会更新本地文件。
+补充说明：
 
-### gconf 文件热重载
+- 同一 Namespace 的多个输出项共用一次订阅
+- 通知 ID 小于已处理值的过期变更会被丢弃
+- 变更队列容量为 64，队列满时新变更被丢弃，依赖后续变更恢复
+- `Watch: false` 时只执行首次同步，后续 Apollo 发布不会更新本地文件
 
-Syncer 的 `Watch` 和 gconf 的 `WithWatchConfig` 是两层独立开关：
+## 本地目录结构
 
-| Syncer `Watch` | gconf `WithWatchConfig` | 效果 |
-|---:|---:|---|
-| `false` | `false` | 仅启动时同步一次，gconf 读取一次 |
-| `true` | `false` | 本地文件持续更新，但已有 gconf 实例不自动重载 |
-| `false` | `true` | gconf 监听本地文件，但 Syncer 不产生后续远端更新 |
-| `true` | `true` | Apollo 发布后，同步到本地并由 gconf 自动重载 |
+以 `config.json` 原样落地、同时转换为 YAML，以及 `application` 原样落地为例：
 
-需要完整端到端热更新时，两个开关都必须启用。
+```text
+<CacheDir>/
+  config.json            -> .apollo/snapshots/config-<hash>.json
+  config.yaml            -> .apollo/snapshots/config-<hash>.yaml
+  application.properties -> .apollo/snapshots/application-<hash>.properties
+  .apollo/
+    index-<id>.json
+    index-<id>.json
+    index-<id>.json
+    snapshots/
+      config-<hash>.json
+      config-<hash>.yaml
+      application-<hash>.properties
+```
+
+| 路径 | 用途 |
+|---|---|
+| `<CacheDir>/<文件名>` | 业务读取的稳定路径，是指向当前版本的 symlink |
+| `.apollo/snapshots/<文件名去扩展名>-<hash>.<格式>` | 不可变的完整版本文件，`<hash>` 为文件内容的 SHA-256 |
+| `.apollo/index-<id>.json` | 每个输出项的 LKG 索引，记录 `hash`、`format`、`release_key`；`<id>` 为 `Namespace:格式` 的 SHA-256 |
+
+### 发布顺序
+
+内容变化时：
+
+1. 生成目标文件内容并完成检查
+2. 计算文件内容的 SHA-256
+3. 写入不可变版本文件并 fsync
+4. 以临时 symlink + rename 原子切换稳定路径
+5. fsync 目录
+6. 以临时文件 + rename 原子更新索引
+
+内容 hash 不变、仅 releaseKey 变化时，只更新索引，不生成新版本、不切换 symlink。
+
+### 持久化
+
+`CacheDir` 是持久化目录，进程退出不会删除。容器部署时应挂载到持久卷，否则重建后无 LKG 可用。历史版本文件不会自动清理。
 
 ## 与 gconf 集成
 
-### properties 型 Namespace
+一个 gconf 实例读取一个文件，`ConfigPaths` 指向 `CacheDir`，`ConfigName` 为输出文件名去掉扩展名：
 
 ```go
-// application -> <CacheDir>/application/application.yaml
-syncer, err := apollo.New(apollo.Config{
-    AppID:      "my-app",
-    MetaServer: "http://apollo-meta:8080",
-    CacheDir:   "/var/lib/my-app/apollo",
-    Watch:      true,
-    Namespaces: []apollo.NamespaceConfig{
-        {Name: "application", Required: true, Format: apollo.FormatYAML},
-    },
-})
-
-conf, err := gconf.New(
-    gconf.WithConfigPaths("/var/lib/my-app/apollo/application"),
+// application -> <CacheDir>/application.properties
+appConf, err := gconf.New(
+    gconf.WithConfigPaths("/var/lib/my-app/apollo"),
     gconf.WithConfigName("application"),
-    gconf.WithConfigType("yaml"),
     gconf.WithWatchConfig(true),
 )
-```
 
-### 文件型 Namespace 转格式
-
-```go
-// config.json -> <CacheDir>/config.json/config.yaml
-Namespaces: []apollo.NamespaceConfig{
-    {Name: "config.json", Required: true, Format: apollo.FormatYAML},
-}
-
-conf, err := gconf.New(
-    gconf.WithConfigPaths("/var/lib/my-app/apollo/config.json"),
+// config.json 转 TOML -> <CacheDir>/config.toml
+tomlConf, err := gconf.New(
+    gconf.WithConfigPaths("/var/lib/my-app/apollo"),
     gconf.WithConfigName("config"),
-    gconf.WithConfigType("yaml"),
+    gconf.WithConfigType("toml"),
     gconf.WithWatchConfig(true),
 )
 ```
 
-### 多 Namespace
+注意事项：
 
-每个 Namespace 使用独立 gconf 实例：
+- **同名不同格式**：`CacheDir` 下同时存在 `config.json` 与 `config.toml` 时，gconf 按扩展名顺序会先找到 `config.json`，此时需要 `WithConfigType` 指定类型，如上例
+- **XML**：gconf（Viper）不支持读取 XML，XML 输出只适用于其他程序读取
+- **properties 占位符**：gconf 读取 properties 时会展开值中的 `${key}`，引用不存在的 key 会被替换为空字符串，自引用报错。Apollo 中的值含 `${...}` 时，经 gconf 读到的值会与 Apollo 中不同；可为该 Namespace 配置 `Format: apollo.FormatJSON` 等格式规避
+- **热更新**：端到端热更新需同时启用 Syncer 的 `Watch` 与 gconf 的 `WithWatchConfig(true)`；gconf 能感知 symlink 切换并自动重载
 
-```go
-appConf, _ := gconf.New(
-    gconf.WithConfigPaths("/var/lib/my-app/apollo/application"),
-    gconf.WithConfigName("application"),
-    gconf.WithConfigType("yaml"),
-    gconf.WithWatchConfig(true),
-)
+| Syncer `Watch` | gconf `WithWatchConfig` | 效果 |
+|---:|---:|---|
+| `false` | `false` | 启动时同步一次，gconf 读取一次 |
+| `true` | `false` | 本地文件持续更新，gconf 不自动重载 |
+| `false` | `true` | gconf 监听文件，但没有后续远端更新 |
+| `true` | `true` | Apollo 发布后同步到本地，gconf 自动重载 |
 
-datasourceConf, _ := gconf.New(
-    gconf.WithConfigPaths("/var/lib/my-app/apollo/datasource"),
-    gconf.WithConfigName("datasource"),
-    gconf.WithConfigType("json"),
-    gconf.WithWatchConfig(true),
-)
-```
+- **优先级**：gconf 中 `Set()` 与环境变量优先于配置文件，被覆盖的 key 不会随 Apollo 变化
 
-不要把 `ConfigPaths` 理解为“读取目录下所有文件”；一个 gconf 实例一次读取一个配置文件，多 Namespace 应创建多个实例。
+## Status 状态查询
 
-## `Status()` 状态查询
-
-`Status()` 只读取同步器当前的内存状态，不访问 Apollo、不读取磁盘，也不触发同步。它是监控和诊断接口，不是同步入口。
+`Status()` 只返回内存中的状态副本，不访问 Apollo、不读磁盘、不触发同步。
 
 ```go
-status := syncer.Status()
-for _, item := range status.Namespaces {
-    log.Printf(
-        "namespace=%s format=%s source=%s releaseKey=%s hash=%s lastSuccess=%s lastError=%s",
-        item.Namespace,
-        item.Format,
-        item.Source,
-        item.ReleaseKey,
-        item.Hash,
-        item.LastSuccess,
-        item.LastError,
-    )
+for _, item := range syncer.Status().Namespaces {
+    log.Printf("namespace=%s format=%s source=%s releaseKey=%s hash=%s lastSuccess=%s lastError=%s",
+        item.Namespace, item.Format, item.Source, item.ReleaseKey, item.Hash, item.LastSuccess, item.LastError)
 }
 ```
-
-字段定义：
 
 | 字段 | 说明 |
 |---|---|
 | `Namespace` | Apollo Namespace 名称 |
-| `Format` | 该状态项对应的目标文件格式 |
-| `ReleaseKey` | Apollo 发布版本标识，仅用于追踪和排障，不参与内容去重 |
-| `Hash` | 实际目标文件字节的 SHA-256，与对应稳定文件内容一致 |
-| `Source` | 当前配置来源：`remote`、`lkg` 或 `empty` |
+| `Format` | 该输出项的目标格式 |
+| `ReleaseKey` | Apollo 发布版本标识，仅用于追踪排障，不参与去重 |
+| `Hash` | 当前文件内容的 SHA-256 |
+| `Source` | `remote`：已发布 Apollo 配置；`lkg`：使用本地 LKG；`empty`：无可用配置 |
 | `LastSuccess` | 最近一次成功发布远端配置的时间 |
-| `LastError` | 最近一次拉取或发布错误；下一次成功后清空 |
+| `LastError` | 最近一次错误，下一次成功后清空 |
 
-`Source` 语义：
-
-| 值 | 含义 |
-|---|---|
-| `remote` | 已从 Apollo 成功拉取并发布当前配置 |
-| `lkg` | 本次远端不可用，当前使用本地最后有效配置 |
-| `empty` | 没有远端配置，也没有可用 LKG |
-
-同一 Namespace 输出多种格式时，`Status().Namespaces` 会返回多条记录，通过 `Format` 区分。
-
-如果业务不需要健康检查、日志或指标，可以不调用 `Status()`；不会影响同步和热更新。
-
-## releaseKey 与内容 hash
-
-两者职责不同：
-
-- **内容 hash**：主版本依据。针对实际目标文件字节计算，用于去重、文件完整性验证和 LKG 校验。
-- **releaseKey**：辅助元数据。表示 Apollo 服务端发布版本，用于日志、状态展示和故障定位。
-
-设计规则：
-
-- releaseKey 变化但内容 hash 不变：只更新索引，不生成新配置版本
-- 内容 hash 变化：生成新版本文件并原子切换
-- releaseKey 暂时获取不到：允许为空，不影响同步正确性
-- 同一远端配置输出 YAML/XML：releaseKey 通常相同，目标文件 hash 不同
-
-## 业务配置更新建议
-
-`gconf.GetString` 等 getter 会在下一次调用时读取 gconf 当前配置；`Unmarshal` 得到的结构体是一次性副本，不会自动变化。
-
-复杂配置建议：
-
-1. 在 gconf 文件变更回调中创建新的局部结构体
-2. 执行 `UnmarshalExact` 或 `Unmarshal`
-3. 做业务字段、范围和兼容性校验
-4. 校验成功后通过 `atomic.Value` 或锁原子替换业务快照
-5. 校验失败时保留上一份业务配置并告警
-
-连接池、HTTP 客户端等资源应先创建和健康检查新实例，再切换引用，最后关闭旧实例。
-
-## 配置优先级与遮蔽
-
-gconf 读取时底层优先级为：
-
-```text
-Set() > 环境变量 > 本地配置文件 > SetDefault()
-```
-
-因此：
-
-- 对某个 key 调用 `gconf.Set()` 后，Apollo 对该 key 的后续修改不会成为最终读取值
-- 同名环境变量会遮蔽 Apollo 落盘文件中的值
-
-排查“Apollo 文件已更新但业务值没变”时，应先检查 `Set()` 和环境变量。
+- 返回顺序与 `Namespaces` 配置顺序一致，同一 Namespace 的多个输出项各占一条
+- 运行中出现的配置内容错误只记录在 `LastError`，建议监控该字段
 
 ## 生命周期
 
 ```go
-syncer, err := apollo.New(cfg) // 只校验配置和构造对象，不连接远端
+syncer, err := apollo.New(cfg)         // 只校验配置并构造对象，不连接远端
 if err != nil {
     return err
 }
-
 if err := syncer.Start(ctx); err != nil { // 首次同步；Watch=true 时同时启动监听
     return err
 }
-
-defer syncer.Close() // 幂等关闭
+defer syncer.Close()                    // 停止监听并关闭 agollo 客户端，可重复调用
 ```
 
-约束：
-
-- 一个 Syncer 实例只应调用一次 `Start()`
-- `Close()` 可重复调用
-- `Start()` 成功后应在进程退出时调用 `Close()`
-- `context.Context` 当前用于 API 形态，尚未驱动内部 agollo 取消；停止同步应调用 `Close()`
+- 一个 Syncer 只应调用一次 `Start()`
+- `Start()` 失败时内部已关闭，无需再调用 `Close()`
+- `context.Context` 当前未用于取消，停止同步应调用 `Close()`
 
 ## 安全与运维
 
-- `Secret` 不应硬编码或写入日志，应通过环境变量或 Secret Manager 注入
-- Apollo AccessKey 只保护请求认证，不加密本地快照
-- `CacheDir` 可能包含数据库地址、令牌等敏感配置，应限制目录和文件权限
-- 容器中应把 `CacheDir` 挂载到持久卷
+- `Secret` 应通过环境变量或密钥管理服务注入，不应硬编码或写入日志
+- Apollo AccessKey 只用于请求认证，不加密本地文件
+- `CacheDir` 可能包含数据库地址、令牌等敏感配置，应限制目录与文件权限
 - 不要把 `CacheDir` 放在系统会自动清理的临时目录
-- 监控 `Status().Source`、`LastError`、`LastSuccess` 和 releaseKey
-- 跨 Namespace 独立发布，不保证多个 Namespace 原子同时生效
-- Apollo 配置传播属于最终一致，不应作为分布式锁或事务协调机制
+- 监控 `Status()` 的 `Source`、`LastError`、`LastSuccess`
+- 多个 Namespace 独立发布，不保证同时生效
+- Apollo 配置传播为最终一致，不应作为分布式锁或事务协调机制
 
 ## 常见问题
 
-### `Start()` 是否已经包含热更新？
-
-当 `Watch: true` 时是。`Start()` 先完成首次同步，再注册变更监听；返回成功后热更新已经运行。`Watch: false` 时仅同步一次。
-
-### `Status()` 是否触发同步？
-
-不会。它只返回内存中的状态副本。
-
-### 为什么 Namespace 目录名和文件名看起来重复？
-
-目录用于隔离该 Namespace 的 stable 文件、历史版本和多个格式索引；文件名用于 gconf 选择具体目标格式。例如：
-
-```text
-config.json/config.yaml
-```
-
-目录名标识 Apollo Namespace，文件名标识目标输出。
-
-### 为什么 XML 多一层 `<doc>`？
-
-XML 只能有一个根节点。结构化配置存在多个顶层 key 时，转换器使用 `<doc>` 包装。
-
-### 为什么修改 Apollo 后文件没有更新？
+### 为什么修改 Apollo 后本地文件没有更新
 
 依次检查：
 
 1. Syncer 是否配置 `Watch: true`
-2. Apollo 是否已发布而不只是保存草稿
-3. `Status().LastError` 是否有错误
-4. releaseKey 或 hash 是否变化
-5. 如果文件已更新但 gconf 未更新，检查 `WithWatchConfig(true)`
-6. 如果 gconf 已更新但业务值未变，检查 `Set()`、环境变量和业务结构体缓存
+2. Apollo 是否已发布，而不只是保存
+3. `Status().LastError` 是否有错误，如内容无法解析或无法转换
+4. 文件已更新但 gconf 未更新：检查 `WithWatchConfig(true)`
+5. gconf 已更新但业务值未变：检查 `Set()`、环境变量与业务结构体缓存
 
-### 为什么 releaseKey 变化但没有新的版本文件？
+### 为什么 releaseKey 变化但没有新的版本文件
 
-因为最终文件内容没有变化。模块使用目标文件内容 hash 去重，此时只更新格式索引中的 releaseKey。
+最终文件内容没有变化。模块按文件内容 hash 去重，此时只更新索引中的 releaseKey。
+
+### 升级后 properties 型 Namespace 的输出文件变了
+
+旧版本默认将 properties 型 Namespace 转为 JSON（如 `application.json`），当前版本默认原样落地为 properties（如 `application.properties`）。旧文件不会被删除也不再更新，读取方需切换到新文件，或配置 `Format: apollo.FormatJSON` 保持原格式。
+
+### 为什么启动失败提示 invalid content
+
+Apollo 上发布的配置无法解析或无法转换为目标格式。按错误信息修正 Apollo 上的配置；若读取方能处理该内容且无需转换，可设置 `SkipValidate: true`。
 
 ## 已知限制
 
-- `Merge=true` 当前未实现
-- `Retry` 当前为预留字段，尚未接入同步流程
-- `.txt` 和带 `.properties` 后缀的文件型 Namespace 只能原样落地，不支持转格式
-- gconf（Viper）读取 properties 文件时会展开 `${key}` 占位符：引用存在的 key 会被替换，引用不存在的 key 会被替换为空字符串，自引用报错。Apollo properties 型 Namespace 的值含 `${...}` 时，原样落地后经 gconf 读到的值会与 Apollo 中不同，可为该 Namespace 配置 `Format: apollo.FormatJSON` 等格式规避
-- 为保留 yaml/yml Namespace 的原文，模块在 agollo 中将 yaml/yml 解析器替换为不预解析；该替换对整个进程生效，同一进程内直接使用 agollo 按 key 读取 yaml Namespace 的代码将无法取值
-- 跨 Namespace 非原子
-- 跨实例配置传播为最终一致
-- 历史快照自动清理尚未实现
+- `Merge`、`Retry` 为预留字段，当前无任何效果
+- `.txt` 与带 `.properties` 后缀的文件型 Namespace 只能原样落地；带 `.properties` 后缀的文件型 Namespace 未在真实 Apollo 上验证
+- 为保留 yaml/yml Namespace 的原文，本模块在 agollo 中将 yaml/yml 解析器替换为不预解析；该替换对整个进程生效，同一进程内直接使用 agollo 按 key 读取 yaml Namespace 的代码将取不到值
+- properties 型 Namespace 的配置项顺序与备注不会保留
+- 历史版本文件不会自动清理
+- 多个 Namespace 之间的发布非原子
