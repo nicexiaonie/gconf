@@ -322,7 +322,7 @@ require (
 
 ## 兼容性
 
-- **Go 版本**：>= 1.16
+- **Go 版本**：>= 1.21
 - **操作系统**：Linux, macOS, Windows
 - **配置格式**：YAML, JSON, TOML, HCL, INI, ENV, Properties
 

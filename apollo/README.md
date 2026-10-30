@@ -42,7 +42,7 @@
 go get github.com/nicexiaonie/gconf/apollo
 ```
 
-- 要求 Go 1.20 及以上
+- 要求 Go 1.21 及以上
 - 依赖 Apollo 官方 Go SDK [agollo](https://github.com/apolloconfig/agollo) v5
 - 需要可访问的 Apollo Meta Server 或 Config Service
 - 依赖只存在于本模块，gconf 主 module 的 `go.sum` 不包含 agollo

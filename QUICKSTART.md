@@ -8,7 +8,7 @@
 go get github.com/nicexiaonie/gconf
 ```
 
-要求 Go 1.16 及以上。
+要求 Go 1.21 及以上。
 
 ## 第一个示例
 
@@ -324,7 +324,7 @@ gconf.Init(
 Dockerfile：
 
 ```dockerfile
-FROM golang:1.20-alpine
+FROM golang:1.21-alpine
 
 WORKDIR /app
 COPY . .
