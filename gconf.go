@@ -27,6 +27,7 @@ type Options struct {
 	// 配置文件名（不包含扩展名）
 	ConfigName string
 	// 配置文件类型（yaml, json, toml, properties, hcl, env, ini）
+	// 为空时按配置文件扩展名推断；显式指定时以指定类型为准
 	ConfigType string
 	// 是否自动监听配置文件变化
 	WatchConfig bool
@@ -47,7 +48,6 @@ func New(opts ...Option) (*Gconf, error) {
 	options := &Options{
 		ConfigPaths: []string{".", "./config"},
 		ConfigName:  "config",
-		ConfigType:  "yaml",
 		WatchConfig: false,
 		Debug:       false,
 	}

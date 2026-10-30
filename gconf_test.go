@@ -358,6 +358,65 @@ func TestConcurrentReadDuringReload(t *testing.T) {
 	}
 }
 
+// TestConfigTypeInferredFromExt 验证未指定 ConfigType 时按扩展名选择解析器
+func TestConfigTypeInferredFromExt(t *testing.T) {
+	cases := []struct {
+		ext     string
+		content string
+	}{
+		{"toml", "[server]\nport = 8080\nname = \"a/b\"\n"},
+		// JSON 合法的 \/ 转义只有 JSON 解析器能处理，YAML 解析器会报错
+		{"json", `{"server": {"port": 8080, "name": "a` + "\x5c" + `/b"}}`},
+		{"yaml", "server:\n  port: 8080\n  name: a/b\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.ext, func(t *testing.T) {
+			dir, err := ioutil.TempDir("", "gconf-ext")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.RemoveAll(dir)
+
+			if err := ioutil.WriteFile(filepath.Join(dir, "config."+c.ext), []byte(c.content), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			conf, err := New(WithConfigPaths(dir))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if v := conf.GetInt("server.port"); v != 8080 {
+				t.Errorf("期望 8080，得到 %d", v)
+			}
+			if v := conf.GetString("server.name"); v != "a/b" {
+				t.Errorf("期望 'a/b'，得到 '%s'", v)
+			}
+		})
+	}
+}
+
+// TestExplicitConfigTypeOverridesExt 验证显式指定 ConfigType 时优先于扩展名
+func TestExplicitConfigTypeOverridesExt(t *testing.T) {
+	dir, err := ioutil.TempDir("", "gconf-ext")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	// 扩展名为 toml，内容为 YAML，只有按 yaml 解析才能成功
+	if err := ioutil.WriteFile(filepath.Join(dir, "config.toml"), []byte("server:\n  port: 8080\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	conf, err := New(WithConfigPaths(dir), WithConfigType("yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := conf.GetInt("server.port"); v != 8080 {
+		t.Errorf("期望 8080，得到 %d", v)
+	}
+}
+
 func TestGetViper(t *testing.T) {
 	conf, _ := New()
 
