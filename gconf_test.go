@@ -417,6 +417,133 @@ func TestExplicitConfigTypeOverridesExt(t *testing.T) {
 	}
 }
 
+type TagBase struct {
+	AppName string `json:"app_name" toml:"app_name"`
+}
+
+type tagDB struct {
+	MaxConn int           `json:"max_conn" toml:"max_conn"`
+	Timeout time.Duration `json:"timeout" toml:"timeout"`
+}
+
+type tagConf struct {
+	TagBase
+	ListenAddr string `json:"listen_addr,omitempty" toml:"listen_addr,omitempty"`
+	DB         tagDB  `json:"db_conf" toml:"db_conf"`
+	Ignored    string `json:"-" toml:"-"`
+}
+
+func writeTagConfig(t *testing.T, ext, content string) string {
+	t.Helper()
+	dir, err := ioutil.TempDir("", "gconf-tag")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ioutil.WriteFile(filepath.Join(dir, "config."+ext), []byte(content), 0644); err != nil {
+		os.RemoveAll(dir)
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// TestUnmarshalWithTagName 验证 WithTagName 后按 json/toml 标签匹配字段，并像原生库一样展开匿名嵌入结构体
+func TestUnmarshalWithTagName(t *testing.T) {
+	cases := []struct {
+		tag     string
+		content string
+	}{
+		{"json", `{"app_name": "demo", "listen_addr": "0.0.0.0:8080", "db_conf": {"max_conn": 10, "timeout": "5s"}}`},
+		{"toml", "app_name = \"demo\"\nlisten_addr = \"0.0.0.0:8080\"\n[db_conf]\nmax_conn = 10\ntimeout = \"5s\"\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.tag, func(t *testing.T) {
+			dir := writeTagConfig(t, c.tag, c.content)
+			defer os.RemoveAll(dir)
+
+			conf, err := New(WithConfigPaths(dir), WithTagName(c.tag))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := tagConf{
+				TagBase:    TagBase{AppName: "demo"},
+				ListenAddr: "0.0.0.0:8080",
+				DB:         tagDB{MaxConn: 10, Timeout: 5 * time.Second},
+			}
+
+			var got tagConf
+			if err := conf.Unmarshal(&got); err != nil {
+				t.Fatal(err)
+			}
+			if got != want {
+				t.Errorf("Unmarshal 期望 %+v，得到 %+v", want, got)
+			}
+
+			var exact tagConf
+			if err := conf.UnmarshalExact(&exact); err != nil {
+				t.Fatal(err)
+			}
+			if exact != want {
+				t.Errorf("UnmarshalExact 期望 %+v，得到 %+v", want, exact)
+			}
+
+			var db tagDB
+			if err := conf.UnmarshalKey("db_conf", &db); err != nil {
+				t.Fatal(err)
+			}
+			if db != want.DB {
+				t.Errorf("UnmarshalKey 期望 %+v，得到 %+v", want.DB, db)
+			}
+		})
+	}
+}
+
+// TestUnmarshalWithTagNameEnvOverride 验证指定标签名后仍保留 viper 的环境变量覆盖与弱类型转换
+func TestUnmarshalWithTagNameEnvOverride(t *testing.T) {
+	dir := writeTagConfig(t, "json", `{"db_conf": {"max_conn": 10}}`)
+	defer os.RemoveAll(dir)
+	os.Setenv("GCONFTAG_DB_CONF_MAX_CONN", "20")
+	defer os.Unsetenv("GCONFTAG_DB_CONF_MAX_CONN")
+
+	conf, err := New(
+		WithConfigPaths(dir),
+		WithTagName("json"),
+		WithAutomaticEnv(true),
+		WithEnvPrefix("GCONFTAG"),
+		WithEnvKeyReplacer(".", "_"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got tagConf
+	if err := conf.Unmarshal(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.DB.MaxConn != 20 {
+		t.Errorf("期望环境变量覆盖为 20，得到 %d", got.DB.MaxConn)
+	}
+}
+
+// TestUnmarshalDefaultTagName 验证未指定标签名时仍只认 mapstructure 标签，行为不变
+func TestUnmarshalDefaultTagName(t *testing.T) {
+	dir := writeTagConfig(t, "json", `{"listen_addr": "0.0.0.0:8080"}`)
+	defer os.RemoveAll(dir)
+
+	conf, err := New(WithConfigPaths(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		JSONTagged      string `json:"listen_addr"`
+		MapstructTagged string `mapstructure:"listen_addr"`
+	}
+	if err := conf.Unmarshal(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.JSONTagged != "" || got.MapstructTagged != "0.0.0.0:8080" {
+		t.Errorf("默认应只认 mapstructure 标签，得到 %+v", got)
+	}
+}
+
 func TestGetViper(t *testing.T) {
 	conf, _ := New()
 

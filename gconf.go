@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/viper"
 )
 
@@ -18,6 +19,8 @@ type Gconf struct {
 	viperMu          sync.RWMutex
 	mu               sync.RWMutex
 	onChangeHandlers []func(fsnotify.Event)
+	// decoderOptions 解析结构体时传给 viper 的解码选项，由 Options.TagName 决定
+	decoderOptions []viper.DecoderConfigOption
 }
 
 // Options 配置选项
@@ -41,6 +44,8 @@ type Options struct {
 	OnConfigChange func(fsnotify.Event)
 	// 是否启用调试日志
 	Debug bool
+	// 解析结构体时匹配字段使用的标签名（如 json、toml），为空时使用 viper 默认的 mapstructure
+	TagName string
 }
 
 // New 创建一个新的配置管理器实例
@@ -60,6 +65,7 @@ func New(opts ...Option) (*Gconf, error) {
 	g := &Gconf{
 		viper:            viper.New(),
 		onChangeHandlers: make([]func(fsnotify.Event), 0),
+		decoderOptions:   decoderOptions(options.TagName),
 	}
 
 	// 设置配置文件路径
@@ -205,6 +211,25 @@ func WithDebug(debug bool) Option {
 	return func(o *Options) {
 		o.Debug = debug
 	}
+}
+
+// WithTagName 设置解析结构体时匹配字段使用的标签名，如 "json"、"toml"
+func WithTagName(tagName string) Option {
+	return func(o *Options) {
+		o.TagName = tagName
+	}
+}
+
+// decoderOptions 根据标签名生成解码选项。
+// json、toml 的原生库会把匿名嵌入结构体的字段提升到上一层，为保持一致同时开启 Squash。
+func decoderOptions(tagName string) []viper.DecoderConfigOption {
+	if tagName == "" || tagName == "mapstructure" {
+		return nil
+	}
+	return []viper.DecoderConfigOption{func(c *mapstructure.DecoderConfig) {
+		c.TagName = tagName
+		c.Squash = tagName == "json" || tagName == "toml"
+	}}
 }
 
 // OnConfigChange 注册配置变化回调函数
@@ -372,21 +397,21 @@ func (g *Gconf) AllSettings() map[string]interface{} {
 func (g *Gconf) Unmarshal(rawVal interface{}) error {
 	g.viperMu.RLock()
 	defer g.viperMu.RUnlock()
-	return g.viper.Unmarshal(rawVal)
+	return g.viper.Unmarshal(rawVal, g.decoderOptions...)
 }
 
 // UnmarshalKey 将指定键的配置解析到结构体
 func (g *Gconf) UnmarshalKey(key string, rawVal interface{}) error {
 	g.viperMu.RLock()
 	defer g.viperMu.RUnlock()
-	return g.viper.UnmarshalKey(key, rawVal)
+	return g.viper.UnmarshalKey(key, rawVal, g.decoderOptions...)
 }
 
 // UnmarshalExact 严格解析配置到结构体（结构体中未定义的字段会报错）
 func (g *Gconf) UnmarshalExact(rawVal interface{}) error {
 	g.viperMu.RLock()
 	defer g.viperMu.RUnlock()
-	return g.viper.UnmarshalExact(rawVal)
+	return g.viper.UnmarshalExact(rawVal, g.decoderOptions...)
 }
 
 // WriteConfig 写入配置到文件

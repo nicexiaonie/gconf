@@ -136,6 +136,7 @@ func main() {
 | `WithEnvPrefix(prefix string)` | 空 | 环境变量前缀，仅在启用 `AutomaticEnv` 时生效 |
 | `WithEnvKeyReplacer(oldNew ...string)` | 无 | 配置 key 到环境变量名的替换规则，如 `WithEnvKeyReplacer(".", "_")`；仅在启用 `AutomaticEnv` 时生效 |
 | `WithDebug(debug bool)` | `false` | 输出加载与重载日志 |
+| `WithTagName(name string)` | 空（`mapstructure`） | 解析结构体时匹配字段使用的标签名，如 `json`、`toml`，见 [使用 json / toml 标签](#使用-json--toml-标签) |
 
 ```go
 conf, err := gconf.New(
@@ -240,8 +241,31 @@ if err := conf.Unmarshal(&cfg); err != nil {
 | `UnmarshalKey("server", &v)` | 解析指定 key 下的配置 |
 | `UnmarshalExact(&v)` | 配置中存在结构体未定义的字段时返回错误 |
 
-- 字段名匹配不区分大小写，名称不一致时使用 `mapstructure` tag
+- 字段名匹配不区分大小写，名称不一致时使用 `mapstructure` tag；只认这一种 tag，`json`、`toml` tag 默认会被忽略
 - 结构体是解析时刻的**副本**，配置重载后不会自动更新，需要在变更回调中重新解析，见 [热更新](#热更新)
+
+### 使用 json / toml 标签
+
+结构体已经使用 `json` 或 `toml` tag 时，通过 `WithTagName` 指定标签名，无需改写为 `mapstructure`：
+
+```go
+type Config struct {
+    ListenAddr string `toml:"listen_addr"`
+    DB         struct {
+        MaxConn int `toml:"max_conn"`
+    } `toml:"db_conf"`
+}
+
+conf, err := gconf.New(gconf.WithTagName("toml"))
+```
+
+- 对 `Unmarshal`、`UnmarshalKey`、`UnmarshalExact` 生效；全局函数使用 `Init` 传入的选项
+- 只改变字段匹配所用的标签，环境变量覆盖、默认值、`"30s"` 转 `time.Duration` 等转换照常生效
+- 一个实例只能指定一种标签名，同一结构体中混用多种 tag 时，只有指定的那种生效
+- tag 中逗号后的修饰符（如 `omitempty`）被忽略；`json:"-"` 的字段不会被赋值
+- 指定 `json` 或 `toml` 时，匿名嵌入的结构体字段会提升到上一层，与 `encoding/json` 及常见 TOML 库一致；以下两种写法与原生库不同：
+  - 嵌入字段自身带名称 tag（如 `` `json:"base"` ``）时仍会被提升，原生库则作为名为 `base` 的普通字段
+  - 以指针形式嵌入的结构体（如 `*Base`）不会被提升，而是按类型名作为普通字段匹配，原生库则会提升
 
 ## 修改配置与优先级
 

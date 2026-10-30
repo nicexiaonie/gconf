@@ -101,7 +101,7 @@ func main() {
 }
 ```
 
-字段名匹配不区分大小写，名称不一致时使用 `mapstructure` tag，如 `` `mapstructure:"max_conn"` ``。
+字段名匹配不区分大小写，名称不一致时使用 `mapstructure` tag，如 `` `mapstructure:"max_conn"` ``。结构体已使用 `json` 或 `toml` tag 时，可通过 `gconf.WithTagName("json")` 指定标签名，见 README 的“使用 json / toml 标签”。
 
 ### 场景 2：环境变量覆盖
 
