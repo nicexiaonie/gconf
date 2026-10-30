@@ -2,7 +2,6 @@ package gconf
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sync"
@@ -291,14 +290,14 @@ func TestOptions(t *testing.T) {
 
 // TestConcurrentReadDuringReload 验证热更新重载与并发读写之间没有数据竞争（需配合 -race 运行）
 func TestConcurrentReadDuringReload(t *testing.T) {
-	dir, err := ioutil.TempDir("", "gconf-race")
+	dir, err := os.MkdirTemp("", "gconf-race")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(dir)
 
 	file := filepath.Join(dir, "config.yaml")
-	if err := ioutil.WriteFile(file, []byte("app:\n  version: 0\n"), 0644); err != nil {
+	if err := os.WriteFile(file, []byte("app:\n  version: 0\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -340,7 +339,7 @@ func TestConcurrentReadDuringReload(t *testing.T) {
 	const last = 20
 	for i := 1; i <= last; i++ {
 		content := fmt.Sprintf("app:\n  version: %d\n", i)
-		if err := ioutil.WriteFile(file, []byte(content), 0644); err != nil {
+		if err := os.WriteFile(file, []byte(content), 0644); err != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -371,13 +370,13 @@ func TestConfigTypeInferredFromExt(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.ext, func(t *testing.T) {
-			dir, err := ioutil.TempDir("", "gconf-ext")
+			dir, err := os.MkdirTemp("", "gconf-ext")
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer os.RemoveAll(dir)
 
-			if err := ioutil.WriteFile(filepath.Join(dir, "config."+c.ext), []byte(c.content), 0644); err != nil {
+			if err := os.WriteFile(filepath.Join(dir, "config."+c.ext), []byte(c.content), 0644); err != nil {
 				t.Fatal(err)
 			}
 
@@ -397,14 +396,14 @@ func TestConfigTypeInferredFromExt(t *testing.T) {
 
 // TestExplicitConfigTypeOverridesExt 验证显式指定 ConfigType 时优先于扩展名
 func TestExplicitConfigTypeOverridesExt(t *testing.T) {
-	dir, err := ioutil.TempDir("", "gconf-ext")
+	dir, err := os.MkdirTemp("", "gconf-ext")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(dir)
 
 	// 扩展名为 toml，内容为 YAML，只有按 yaml 解析才能成功
-	if err := ioutil.WriteFile(filepath.Join(dir, "config.toml"), []byte("server:\n  port: 8080\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte("server:\n  port: 8080\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -435,11 +434,11 @@ type tagConf struct {
 
 func writeTagConfig(t *testing.T, ext, content string) string {
 	t.Helper()
-	dir, err := ioutil.TempDir("", "gconf-tag")
+	dir, err := os.MkdirTemp("", "gconf-tag")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ioutil.WriteFile(filepath.Join(dir, "config."+ext), []byte(content), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "config."+ext), []byte(content), 0644); err != nil {
 		os.RemoveAll(dir)
 		t.Fatal(err)
 	}
@@ -520,6 +519,28 @@ func TestUnmarshalWithTagNameEnvOverride(t *testing.T) {
 	}
 	if got.DB.MaxConn != 20 {
 		t.Errorf("期望环境变量覆盖为 20，得到 %d", got.DB.MaxConn)
+	}
+}
+
+// TestSubKeepsTagName 验证 Sub 返回的子配置沿用父实例的标签名
+func TestSubKeepsTagName(t *testing.T) {
+	dir := writeTagConfig(t, "json", `{"db_conf": {"max_conn": 10, "timeout": "5s"}}`)
+	defer os.RemoveAll(dir)
+
+	conf, err := New(WithConfigPaths(dir), WithTagName("json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := conf.Sub("db_conf")
+	if sub == nil {
+		t.Fatal("Sub 返回 nil")
+	}
+	var got tagDB
+	if err := sub.Unmarshal(&got); err != nil {
+		t.Fatal(err)
+	}
+	if want := (tagDB{MaxConn: 10, Timeout: 5 * time.Second}); got != want {
+		t.Errorf("Sub.Unmarshal 期望 %+v，得到 %+v", want, got)
 	}
 }
 

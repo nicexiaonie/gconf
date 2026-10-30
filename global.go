@@ -1,6 +1,7 @@
 package gconf
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/fsnotify/fsnotify"
@@ -32,7 +33,7 @@ func InitWithConfig(opts ...Option) error {
 }
 
 // GetInstance 获取全局配置实例
-// 如果未调用 Init 进行初始化，将使用默认配置自动初始化
+// 如果未调用 Init 进行初始化，将使用默认配置自动初始化；自动初始化失败（如配置文件解析失败）时 panic
 func GetInstance() *Gconf {
 	defaultInstanceMu.RLock()
 	if defaultInstance != nil {
@@ -45,7 +46,11 @@ func GetInstance() *Gconf {
 	defaultInstanceMu.Lock()
 	defer defaultInstanceMu.Unlock()
 	if defaultInstance == nil {
-		defaultInstance, _ = New()
+		instance, err := New()
+		if err != nil {
+			panic(fmt.Sprintf("gconf: 未调用 Init，使用默认选项自动初始化失败: %v（应在启动时调用 Init 并检查错误）", err))
+		}
+		defaultInstance = instance
 	}
 	return defaultInstance
 }

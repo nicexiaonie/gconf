@@ -1,7 +1,10 @@
 package gconf
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -37,6 +40,42 @@ func TestGetInstance(t *testing.T) {
 	if instance != instance2 {
 		t.Error("GetInstance 应该返回相同的单例")
 	}
+}
+
+// TestGetInstancePanicsOnInvalidConfig 验证未调用 Init 且默认配置文件解析失败时，GetInstance 带原始错误 panic
+func TestGetInstancePanicsOnInvalidConfig(t *testing.T) {
+	dir, err := os.MkdirTemp("", "gconf-global")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("app: [1, 2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(wd)
+	defaultInstance = nil
+	defer func() { defaultInstance = nil }()
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("期望 GetInstance panic")
+		}
+		if msg := fmt.Sprint(r); !strings.Contains(msg, "While parsing config") {
+			t.Errorf("panic 信息应包含解析错误，得到: %s", msg)
+		}
+		if defaultInstance != nil {
+			t.Error("自动初始化失败时不应设置全局实例")
+		}
+	}()
+	GetInstance()
 }
 
 func TestGlobalFunctions(t *testing.T) {

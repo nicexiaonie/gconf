@@ -8,7 +8,7 @@
 go get github.com/nicexiaonie/gconf
 ```
 
-要求 Go 1.14 及以上。
+要求 Go 1.16 及以上。
 
 ## 第一个示例
 

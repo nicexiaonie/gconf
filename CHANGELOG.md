@@ -2,6 +2,18 @@
 
 本文档记录了 Gconf 的所有重要变更。
 
+## [Unreleased]
+
+### 修复 🐛
+
+- **`Sub()` 返回的子配置沿用父实例的 `WithTagName`**：此前子配置的 `Unmarshal` 等方法会退回 mapstructure 标签，按 json/toml 标签定义的字段解析为零值
+- **`GetInstance()` 自动初始化失败时立即 panic 并携带原始错误**：此前错误被忽略、返回 nil，后续调用以无错误信息的空指针 panic
+
+### 不兼容变更 ⚠️
+
+- 未调用 `Init` 且默认配置文件无法解析时，`GetInstance()` 不再返回 nil，而是直接 panic；依赖判断其返回值是否为 nil 的代码需改为在启动时调用 `Init` 并检查错误
+- 主模块最低 Go 版本由 1.14 提升至 1.16；依赖版本不变
+
 ## [1.1.0] - 2026-10-30
 
 主包 `v1.1.0`，Apollo 子包 `apollo/v1.1.0`。

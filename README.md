@@ -1,6 +1,6 @@
 # Gconf
 
-[![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.14-blue)](https://golang.org/)
+[![Go Version](https://img.shields.io/badge/Go-%3E%3D%201.16-blue)](https://golang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 Gconf 是基于 [spf13/viper](https://github.com/spf13/viper) 的 Go 配置管理封装，提供 Options 风格的初始化、全局实例、并发安全的读写与热更新，以及可选的 Apollo 配置中心同步模块。
@@ -43,7 +43,7 @@ Gconf 是基于 [spf13/viper](https://github.com/spf13/viper) 的 Go 配置管�
 go get github.com/nicexiaonie/gconf
 ```
 
-- 主模块要求 Go 1.14 及以上
+- 主模块要求 Go 1.16 及以上
 - 可选的 Apollo 子模块为独立 Go module，要求 Go 1.20 及以上，详见 [Apollo 配置中心](#apollo-配置中心)
 
 ## 快速开始
@@ -175,7 +175,7 @@ port := gconf.GetInt("server.port")
 
 - `Init` 可重复调用，每次都用新选项创建新实例并替换全局实例；旧实例已启动的文件监听不会停止
 - `InitWithConfig` 与 `Init` 行为一致，为兼容旧版本保留
-- `GetInstance()` 返回全局实例；未调用 `Init` 时使用默认选项自动创建，**此时的创建错误（如配置文件解析失败）会被忽略，实例为 nil，后续调用会 panic**。生产代码应在启动时调用 `Init` 并检查错误
+- `GetInstance()` 返回全局实例；未调用 `Init` 时使用默认选项自动创建，**创建失败（如配置文件解析失败）时 `GetInstance` 及所有包级函数会直接 panic，panic 信息包含原始错误**。生产代码应在启动时调用 `Init` 并检查错误
 - 包级函数只覆盖常用方法，其余方法通过 `gconf.GetInstance()` 调用，见 [API 速查](#api-速查)
 
 ## 读取配置

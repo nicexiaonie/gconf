@@ -488,6 +488,7 @@ func (g *Gconf) Sub(key string) *Gconf {
 	return &Gconf{
 		viper:            subViper,
 		onChangeHandlers: make([]func(fsnotify.Event), 0),
+		decoderOptions:   g.decoderOptions,
 	}
 }
 
