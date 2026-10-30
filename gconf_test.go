@@ -505,6 +505,11 @@ func TestConfigTypeInferredFromExt(t *testing.T) {
 		// JSON 合法的 \/ 转义只有 JSON 解析器能处理，YAML 解析器会报错
 		{"json", `{"server": {"port": 8080, "name": "a` + "\x5c" + `/b"}}`},
 		{"yaml", "server:\n  port: 8080\n  name: a/b\n"},
+		// properties、ini 不在 viper 核心内置格式中，由 gconf 注册解析器
+		{"properties", "server.port=8080\nserver.name=a/b\n"},
+		{"props", "server.port=8080\nserver.name=a/b\n"},
+		{"prop", "server.port=8080\nserver.name=a/b\n"},
+		{"ini", "[server]\nport=8080\nname=a/b\n"},
 	}
 	for _, c := range cases {
 		t.Run(c.ext, func(t *testing.T) {
@@ -529,6 +534,82 @@ func TestConfigTypeInferredFromExt(t *testing.T) {
 				t.Errorf("期望 'a/b'，得到 '%s'", v)
 			}
 		})
+	}
+}
+
+// TestNonCoreFormats 验证 viper 核心未内置的 HCL、properties、INI 读取语义不变，且可写回文件
+func TestNonCoreFormats(t *testing.T) {
+	dir, err := os.MkdirTemp("", "gconf-fmt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	// HCL 块结构解析为列表，tfvars 同样按 HCL 解析
+	for _, ext := range []string{"hcl", "tfvars"} {
+		sub := filepath.Join(dir, ext)
+		if err := os.MkdirAll(sub, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(sub, "config."+ext), []byte("name = \"demo\"\nserver { port = 8080 }\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		conf, err := New(WithConfigPaths(sub))
+		if err != nil {
+			t.Fatalf("%s: %v", ext, err)
+		}
+		if v := conf.GetString("name"); v != "demo" {
+			t.Errorf("%s: 期望 'demo'，得到 '%s'", ext, v)
+		}
+		servers, ok := conf.Get("server").([]map[string]interface{})
+		if !ok || len(servers) != 1 || servers[0]["port"] != 8080 {
+			t.Errorf("%s: 期望 server 为含 port=8080 的列表，得到 %#v", ext, conf.Get("server"))
+		}
+	}
+
+	// properties 值中的 ${key} 会被展开
+	propDir := filepath.Join(dir, "properties")
+	if err := os.MkdirAll(propDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(propDir, "config.properties"), []byte("host=localhost\nurl=http://${host}:8080\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	conf, err := New(WithConfigPaths(propDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := conf.GetString("url"); v != "http://localhost:8080" {
+		t.Errorf("期望 'http://localhost:8080'，得到 '%s'", v)
+	}
+
+	// 写回文件后可按同一格式重新读取
+	for _, ext := range []string{"properties", "ini", "hcl"} {
+		out := filepath.Join(dir, "out")
+		if err := os.MkdirAll(out, 0755); err != nil {
+			t.Fatal(err)
+		}
+		w, err := New(WithConfigPaths(out), WithConfigName("none"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Set("app.name", "demo")
+		file := filepath.Join(out, "written."+ext)
+		if err := w.WriteConfigAs(file); err != nil {
+			t.Fatalf("%s: 写入失败: %v", ext, err)
+		}
+		r, err := New(WithConfigPaths(out), WithConfigName("written"))
+		if err != nil {
+			t.Fatalf("%s: 读取失败: %v", ext, err)
+		}
+		if ext == "hcl" {
+			if r.Get("app") == nil {
+				t.Errorf("%s: 写回后读不到 app", ext)
+			}
+		} else if v := r.GetString("app.name"); v != "demo" {
+			t.Errorf("%s: 期望 'demo'，得到 '%s'", ext, v)
+		}
+		os.Remove(file)
 	}
 }
 

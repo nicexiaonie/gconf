@@ -88,7 +88,7 @@ func main() {
 
 1. 按 `ConfigPaths` 的顺序逐个目录查找，默认 `"."`、`"./config"`
 2. 在每个目录中按以下扩展名顺序查找 `<ConfigName>.<扩展名>`，**第一个存在的文件生效**：
-   `json`、`toml`、`yaml`、`yml`、`properties`、`props`、`prop`、`hcl`、`dotenv`、`env`、`ini`
+   `json`、`toml`、`yaml`、`yml`、`properties`、`props`、`prop`、`hcl`、`tfvars`、`dotenv`、`env`、`ini`
 3. 显式指定了 `ConfigType` 时，还会查找不带扩展名的 `<ConfigName>` 文件
 
 同一目录同时存在 `config.json` 与 `config.yaml` 时，读取的是 `config.json`。
@@ -115,11 +115,11 @@ func main() {
 
 | 格式 | 扩展名 | 说明 |
 |---|---|---|
-| YAML | `.yaml`、`.yml` | |
+| YAML | `.yaml`、`.yml` | 按 YAML 1.2 解析，`yes`、`no`、`on`、`off` 读为字符串而非布尔值，布尔值需写为 `true`、`false` |
 | JSON | `.json` | 数字统一读为 `float64`，通过 `GetInt` 等方法读取时会转换 |
 | TOML | `.toml` | |
 | properties | `.properties`、`.props`、`.prop` | key 中的 `.` 视为层级；值中的 `${key}` 会被展开，引用不存在的 key 时替换为空字符串，自引用报错 |
-| HCL | `.hcl` | 块结构解析为列表，如 `server { port = 8080 }` 读为 `server: [{port: 8080}]`，不能用 `server.port` 访问 |
+| HCL | `.hcl`、`.tfvars` | 块结构解析为列表，如 `server { port = 8080 }` 读为 `server: [{port: 8080}]`，不能用 `server.port` 访问 |
 | INI | `.ini` | section 作为第一层，如 `[server]` 下的 `port` 读为 `server.port` |
 | env / dotenv | `.env`、`.dotenv` | 扁平 key，如 `SERVER_PORT=8080` 读为 `server_port`，不会拆成层级 |
 
@@ -361,7 +361,7 @@ conf.OnConfigChange(func(e fsnotify.Event) {
 - 所有读取方法加读锁，`Set`、`SetDefault`、重载等修改操作加写锁
 - 重载在写锁内完成，`Unmarshal`、`AllSettings` 不会读到新旧混合的配置
 - `GetViper()` 返回的底层实例绕过 gconf 的锁，与热更新并发使用时不保证安全
-- `Sub()` 返回的子配置是调用时刻的副本，父配置重载后不会更新
+- `Sub()` 返回的子配置是调用时刻的副本，父配置重载后不会更新；子配置沿用父实例的环境变量设置，如 `conf.Sub("server").GetInt("port")` 读取 `MYAPP_SERVER_PORT`
 
 ### 业务配置更新建议
 

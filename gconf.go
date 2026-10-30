@@ -9,7 +9,10 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/mitchellh/mapstructure"
+	"github.com/go-viper/encoding/hcl"
+	"github.com/go-viper/encoding/ini"
+	"github.com/go-viper/encoding/javaproperties"
+	"github.com/go-viper/mapstructure/v2"
 	"github.com/spf13/viper"
 )
 
@@ -68,7 +71,7 @@ func New(opts ...Option) (*Gconf, error) {
 	}
 
 	g := &Gconf{
-		viper:            viper.New(),
+		viper:            newViper(),
 		onChangeHandlers: make([]func(fsnotify.Event), 0),
 		decoderOptions:   decoderOptions(options.TagName),
 	}
@@ -120,6 +123,22 @@ func New(opts ...Option) (*Gconf, error) {
 	}
 
 	return g, nil
+}
+
+// newViper 创建 viper 实例，并注册 viper 核心未内置的 HCL、Java properties、INI 解析器，
+// 与 viper 支持的扩展名对应，使这些格式的配置文件可读写。
+// 默认注册表的 RegisterCodec 不会返回错误，因此忽略其返回值
+func newViper() *viper.Viper {
+	registry := viper.NewCodecRegistry()
+	hclCodec := hcl.Codec{}
+	propertiesCodec := &javaproperties.Codec{}
+	_ = registry.RegisterCodec("hcl", hclCodec)
+	_ = registry.RegisterCodec("tfvars", hclCodec)
+	_ = registry.RegisterCodec("properties", propertiesCodec)
+	_ = registry.RegisterCodec("props", propertiesCodec)
+	_ = registry.RegisterCodec("prop", propertiesCodec)
+	_ = registry.RegisterCodec("ini", ini.Codec{})
+	return viper.NewWithOptions(viper.WithCodecRegistry(registry))
 }
 
 // watchConfig 监听配置文件所在目录，判定规则与 viper 的 WatchConfig 一致：

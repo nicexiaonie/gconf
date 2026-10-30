@@ -259,7 +259,7 @@ fmt.Println(gconf.GetInt("port")) // 9091
 | JSON | `.json` |
 | TOML | `.toml` |
 | properties | `.properties`、`.props`、`.prop` |
-| HCL | `.hcl` |
+| HCL | `.hcl`、`.tfvars` |
 | INI | `.ini` |
 | env / dotenv | `.env`、`.dotenv` |
 

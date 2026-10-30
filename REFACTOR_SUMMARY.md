@@ -287,8 +287,12 @@ gconf/
 
 ```go
 require (
-    github.com/fsnotify/fsnotify v1.4.9  // 文件监听
-    github.com/spf13/viper v1.7.1        // 配置管理核心
+    github.com/fsnotify/fsnotify v1.8.0                 // 文件监听
+    github.com/go-viper/encoding/hcl v0.1.0             // HCL 解析
+    github.com/go-viper/encoding/ini v0.1.1             // INI 解析
+    github.com/go-viper/encoding/javaproperties v0.1.0 // properties 解析
+    github.com/go-viper/mapstructure/v2 v2.2.1          // 结构体解码选项
+    github.com/spf13/viper v1.20.1                      // 配置管理核心
 )
 ```
 

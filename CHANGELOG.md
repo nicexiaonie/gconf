@@ -8,6 +8,13 @@
 
 - **`Close()` 停止配置文件监听并释放监听资源**：可重复调用；Close 后不再重载与触发回调，仍可读取最后一次加载的配置
 
+### 变更 🔧
+
+- **viper 由 v1.7.1 升级至 v1.20.1**，fsnotify 随之升级至 v1.8.0，结构体解码改用 `github.com/go-viper/mapstructure/v2`
+  - viper v1.20 核心不再内置 HCL、properties、INI 解析器，gconf 注册官方 `github.com/go-viper/encoding` 中的对应解析器，这三种格式的读取结果与写出行为不变
+  - 新增识别 `.tfvars` 扩展名，按 HCL 解析；查找顺序位于 `hcl` 之后
+  - TOML 改由 go-toml v2 解析，修复仅含日期的值（如 `d = 1979-05-27`）解析失败
+
 ### 修复 🐛
 
 - **再次调用 `Init` 时关闭被替换的旧实例**：此前旧实例的文件监听无法停止，goroutine 与文件句柄泄漏，旧实例的回调仍会触发
@@ -20,7 +27,10 @@
 ### 不兼容变更 ⚠️
 
 - 未调用 `Init` 且默认配置文件无法解析时，`GetInstance()` 不再返回 nil，而是直接 panic；依赖判断其返回值是否为 nil 的代码需改为在启动时调用 `Init` 并检查错误
-- 主模块最低 Go 版本由 1.14 提升至 1.21，Apollo 子模块由 1.20 提升至 1.21；依赖版本不变
+- 主模块最低 Go 版本由 1.14 提升至 1.21，Apollo 子模块由 1.20 提升至 1.21
+- YAML 改按 1.2 规范解析：`yes`、`no`、`on`、`off` 读为字符串，`GetBool` 返回 false，需改写为 `true`、`false`
+- `Sub()` 返回的子配置沿用父实例的环境变量设置（`AutomaticEnv`、前缀与替换规则），此前子配置不读取环境变量
+- `OnConfigChange` 回调参数类型来自 fsnotify，引用方的 fsnotify 随之升级至 v1.8.0
 
 ## [1.1.0] - 2026-10-30
 
