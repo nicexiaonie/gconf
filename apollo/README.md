@@ -29,7 +29,8 @@
 - **原样落地**：未配置目标格式时，文件型 Namespace 写入 Apollo 原文，properties 型 Namespace 写为 properties 文件
 - **格式转换**：可转换为 JSON、YAML、YML、XML、TOML、properties；无法表达的内容报错，不做自动修正
 - 同一 Namespace 可同时输出多种格式
-- 原子发布：版本文件 + 稳定 symlink + fsync，中断不会留下半写文件
+- 原子发布：版本文件 + 稳定 symlink + fsync，中断不会留下半写文件；只保留当前版本，不累积历史版本
+- 首次拉取可配置重试，`Start(ctx)` 可通过 ctx 取消或设置超时
 - 按目标文件 SHA-256 去重，内容未变化时不生成新版本
 - LKG（Last Known Good，最后一次已知有效配置）降级启动
 - 可选持续热更新，默认关闭
@@ -106,7 +107,7 @@ syncer, err := apollo.New(apollo.Config{
 | `Namespaces` | 是 | — | 输出项列表，至少一个 |
 | `Watch` | 否 | `false` | 首次同步后是否持续监听 Apollo 变更 |
 | `Merge` | 否 | `false` | 预留字段，**当前无任何效果**，设置为 `true` 也不会报错 |
-| `Retry` | 否 | 零值 | 预留字段，**当前无任何效果** |
+| `Retry` | 否 | 零值（不重试） | 首次拉取的重试策略，见 [首次拉取重试](#首次拉取重试) |
 
 ### `NamespaceConfig`
 
@@ -266,43 +267,74 @@ Apollo 的 Namespace 分为两类，本模块按名称后缀区分，规则与 A
 | 远端配置 | 该输出项的 LKG | `Required` | 结果 |
 |---|---|---:|---|
 | 成功 | 任意 | 任意 | 使用远端配置，`Source=remote` |
-| 失败 | 存在且有效 | 任意 | 使用 LKG 降级，`Source=lkg`，`Start()` 成功 |
+| 失败 | 存在且有效 | 任意 | 使用 LKG 降级，`Source=lkg`，远端错误记录到 `LastError`，`Start()` 成功 |
 | 失败 | 不存在 | `false` | `Source=empty`，`Start()` 继续 |
 | 失败 | 不存在 | `true` | `Start()` 返回错误 |
 
 LKG 按输出项独立维护：同一 Namespace 输出 YAML 和 XML 时，一个格式没有 LKG 不影响另一个格式。
 
+### 首次拉取重试
+
+agollo 启动时若首次同步失败，会在后台每 2 秒长轮询继续加载。`Retry` 让 `Start()` 按间隔重新检查尚未加载成功的 Namespace，等待其加载完成，用尽次数后再按 `Required` 与 LKG 处理：
+
+| 字段 | 说明 |
+|---|---|
+| `MaxAttempts` | 总尝试次数（含第一次），`0` 或 `1` 表示不重试 |
+| `Interval` | 两次尝试的间隔，`MaxAttempts` 大于 1 时必填 |
+
+```go
+Retry: apollo.RetryConfig{MaxAttempts: 5, Interval: 2 * time.Second},
+```
+
+- 重试只针对 Apollo 不可用；配置内容错误不重试，直接失败
+- 有 LKG 的 Namespace 同样会重试，以便尽量使用最新配置；希望尽快以 LKG 启动时减小重试次数
+- 不同 Namespace 在同一轮中检查，总等待时间上限约为 `(MaxAttempts-1) × Interval`
+- 判断依据是 agollo 是否已成功加载该 Namespace：Apollo 中没有任何配置项的 properties 型 Namespace 在 agollo 中始终处于未加载状态，会被视为不可用
+
+### 取消启动
+
+`Start(ctx)` 的 ctx 用于取消启动过程，包括连接 Apollo（agollo 启动在远端不可用时可能阻塞十余秒）与重试等待。ctx 结束时 `Start()` 关闭已建立的连接并返回 ctx 的错误，可用 `errors.Is(err, context.DeadlineExceeded)` 判断；此时不会以 LKG 降级启动。`Start()` 返回后不再使用 ctx，停止同步应调用 `Close()`。
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+if err := syncer.Start(ctx); err != nil {
+    return err
+}
+```
+
 ### 启动流程
 
 ```text
+Watch=true 时先注册 agollo 变更监听，期间到达的变更暂存，首次同步完成后再处理
 对每个输出项：
   读取该输出项的 LKG
     ├─ 存在且 hash 校验通过：作为降级候选，Source=lkg
     └─ 不存在或校验失败：Source=empty
   拉取 Apollo 配置
-    ├─ 失败：按 Required 与 LKG 决定是否报错
+    ├─ 失败：按 Required 与 LKG 决定是否报错，错误记录到 LastError
     └─ 成功：生成落地内容
           ├─ 内容错误：Start() 返回错误，不写入
           └─ 成功：原子发布，Source=remote
 ```
 
-LKG 只校验文件完整性（hash），不解析内容。LKG 保证可用性，不保证配置是最新的；对陈旧配置敏感的业务应自行增加最大陈旧时间与告警。
+LKG 只校验文件完整性，不解析内容：稳定路径 symlink 指向的版本文件，其内容 SHA-256 必须与文件名中的 hash 一致。索引仅提供 releaseKey；索引丢失或落后于 symlink（如切换 symlink 后、更新索引前进程崩溃）时，LKG 仍然有效，`ReleaseKey` 为空。LKG 保证可用性，不保证配置是最新的；对陈旧配置敏感的业务应自行增加最大陈旧时间与告警。
 
 ## 热更新
 
 `Watch: true` 时：
 
-1. `Start()` 完成首次同步
-2. 注册 agollo 变更监听
-3. Apollo 发布后，agollo 收到完整 Namespace 快照及 releaseKey
-4. 变更进入串行队列，由单个 worker 处理
-5. 为该 Namespace 的所有输出项分别生成内容、去重并原子发布
+1. `Start()` 先注册 agollo 变更监听，再完成首次同步；同步期间到达的变更暂存，同步完成后再处理，不会丢失
+2. Apollo 发布后，agollo 收到完整 Namespace 快照及 releaseKey
+3. 变更进入待处理表，由单个 worker 串行处理
+4. 为该 Namespace 的所有输出项分别生成内容、去重并原子发布
 
 补充说明：
 
 - 同一 Namespace 的多个输出项共用一次订阅
 - 通知 ID 小于已处理值的过期变更会被丢弃
-- 变更队列容量为 64，队列满时新变更被丢弃，依赖后续变更恢复
+- 待处理表中每个 Namespace 只保留通知 ID 最新的一条：短时间内多次发布时会合并中间版本，但最新版本一定落地，内存占用不随发布次数增长
+- `Close()` 后到达的变更直接忽略
 - `Watch: false` 时只执行首次同步，后续 Apollo 发布不会更新本地文件
 
 ## 本地目录结构
@@ -327,7 +359,7 @@ LKG 只校验文件完整性（hash），不解析内容。LKG 保证可用性�
 | 路径 | 用途 |
 |---|---|
 | `<CacheDir>/<文件名>` | 业务读取的稳定路径，是指向当前版本的 symlink |
-| `.apollo/snapshots/<文件名去扩展名>-<hash>.<格式>` | 不可变的完整版本文件，`<hash>` 为文件内容的 SHA-256 |
+| `.apollo/snapshots/<文件名去扩展名>-<hash>.<格式>` | 当前版本的完整文件，内容不可变，`<hash>` 为文件内容的 SHA-256；每个输出项只保留当前版本 |
 | `.apollo/index-<id>.json` | 每个输出项的 LKG 索引，记录 `hash`、`format`、`release_key`；`<id>` 为 `Namespace:格式` 的 SHA-256 |
 
 ### 发布顺序
@@ -340,12 +372,19 @@ LKG 只校验文件完整性（hash），不解析内容。LKG 保证可用性�
 4. 以临时 symlink + rename 原子切换稳定路径
 5. fsync 目录
 6. 以临时文件 + rename 原子更新索引
+7. 删除不再被任何稳定路径 symlink 引用的版本文件
 
-内容 hash 不变、仅 releaseKey 变化时，只更新索引，不生成新版本、不切换 symlink。
+内容 hash 不变、仅 releaseKey 变化时，只更新索引，不生成新版本、不切换 symlink，同样执行第 7 步。
+
+清理规则：
+
+- 以 `CacheDir` 下所有 symlink 的实际指向判断引用，其他输出项的当前版本、已从配置中移除但稳定路径仍在的输出项的版本都不会被删除
+- 发布前已打开旧版本文件的读取方不受影响，仍能读到完整的旧内容
+- 清理失败不影响本次发布，残留文件在下次发布时再次清理；旧版本遗留的历史文件在升级后的首次发布时清理
 
 ### 持久化
 
-`CacheDir` 是持久化目录，进程退出不会删除。容器部署时应挂载到持久卷，否则重建后无 LKG 可用。历史版本文件不会自动清理。
+`CacheDir` 是持久化目录，进程退出不会删除。容器部署时应挂载到持久卷，否则重建后无 LKG 可用。
 
 ## 与 gconf 集成
 
@@ -423,7 +462,7 @@ defer syncer.Close()                    // 停止监听并关闭 agollo 客户�
 
 - 一个 Syncer 只应调用一次 `Start()`
 - `Start()` 失败时内部已关闭，无需再调用 `Close()`
-- `context.Context` 当前未用于取消，停止同步应调用 `Close()`
+- `Start(ctx)` 的 ctx 只作用于启动过程，见 [取消启动](#取消启动)；停止同步应调用 `Close()`
 
 ## 安全与运维
 
@@ -461,9 +500,10 @@ Apollo 上发布的配置无法解析或无法转换为目标格式。按错误�
 
 ## 已知限制
 
-- `Merge`、`Retry` 为预留字段，当前无任何效果
+- `Merge` 为预留字段，当前无任何效果
+- Apollo 中没有任何配置项的 properties 型 Namespace 在 agollo 中始终处于未加载状态，被视为 Apollo 不可用
+- 热更新时 releaseKey 取自 agollo 回调执行时的当前值，连续快速发布时可能与内容相差一个版本；releaseKey 仅用于排障，去重与过期判断不依赖它
 - `.txt` 与带 `.properties` 后缀的文件型 Namespace 只能原样落地；带 `.properties` 后缀的文件型 Namespace 未在真实 Apollo 上验证
 - 为保留 yaml/yml Namespace 的原文，本模块在 agollo 中将 yaml/yml 解析器替换为不预解析；该替换对整个进程生效，同一进程内直接使用 agollo 按 key 读取 yaml Namespace 的代码将取不到值
 - properties 型 Namespace 的配置项顺序与备注不会保留
-- 历史版本文件不会自动清理
 - 多个 Namespace 之间的发布非原子

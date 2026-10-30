@@ -10,7 +10,13 @@ import (
 
 // TestIntegrationApolloFormats 连接真实 Apollo，验证 config.json（源 JSON）
 // 可转格式为 json/yaml/xml 落盘，且落盘内容可按目标格式解析回来。
+// 需设置 APOLLO_META_SERVER 与 APOLLO_APP_ID，且该应用存在 JSON 格式的 config.json namespace，否则跳过。
 func TestIntegrationApolloFormats(t *testing.T) {
+	metaServer := os.Getenv("APOLLO_META_SERVER")
+	appID := os.Getenv("APOLLO_APP_ID")
+	if metaServer == "" || appID == "" {
+		t.Skip("APOLLO_META_SERVER and APOLLO_APP_ID not set")
+	}
 	cases := []struct {
 		name   string
 		format Format
@@ -23,9 +29,9 @@ func TestIntegrationApolloFormats(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
 			cfg := Config{
-				AppID:      "Conduit-Service",
+				AppID:      appID,
 				Cluster:    "default",
-				MetaServer: "http://159.75.184.171:32369",
+				MetaServer: metaServer,
 				CacheDir:   dir,
 				Namespaces: []NamespaceConfig{
 					{Name: "config.json", Required: true, Format: c.format},

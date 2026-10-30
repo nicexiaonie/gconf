@@ -1,6 +1,7 @@
 package apollo
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
@@ -56,6 +57,35 @@ func newAgolloAdapter(cfg Config) (*agolloAdapter, error) {
 	return &agolloAdapter{client: client, appConfig: appConfig}, nil
 }
 
+// startAgolloAdapter 在 ctx 约束下创建 agollo 适配器。
+// agollo 启动会阻塞到首次同步结束（远端不可用时可达十余秒）且不支持取消，因此放到 goroutine 中执行；
+// ctx 先结束时立即返回，之后才创建成功的客户端随即关闭。
+func startAgolloAdapter(ctx context.Context, cfg Config) (RemoteConfig, error) {
+	type result struct {
+		adapter *agolloAdapter
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		a, err := newAgolloAdapter(cfg)
+		done <- result{adapter: a, err: err}
+	}()
+	select {
+	case r := <-done:
+		if r.err != nil {
+			return nil, r.err
+		}
+		return r.adapter, nil
+	case <-ctx.Done():
+		go func() {
+			if r := <-done; r.err == nil {
+				r.adapter.Close()
+			}
+		}()
+		return nil, fmt.Errorf("apollo: start canceled: %w", ctx.Err())
+	}
+}
+
 // joinNames 拼接 namespace 列表，同名去重（agollo 订阅去重）。
 func joinNames(nss []NamespaceConfig) string {
 	seen := make(map[string]bool)
@@ -91,6 +121,11 @@ func (a *agolloAdapter) Snapshot(ns string) (Snapshot, error) {
 	cfg := a.client.GetConfig(ns)
 	if cfg == nil {
 		return Snapshot{}, fmt.Errorf("namespace %q unavailable", ns)
+	}
+	// agollo 启动时为每个 namespace 预建空缓存，首次成功同步后才标记为已初始化；
+	// 未初始化的空缓存不代表远端配置为空，必须视为不可用，否则会以空配置覆盖 LKG。
+	if !cfg.GetIsInit() {
+		return Snapshot{}, fmt.Errorf("namespace %q not loaded from apollo", ns)
 	}
 	if !isFileType(ns) {
 		// properties 无后缀：直接取 key-value

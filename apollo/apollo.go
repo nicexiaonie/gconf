@@ -2,9 +2,6 @@ package apollo
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -47,10 +44,13 @@ type NamespaceConfig struct {
 	SkipValidate bool
 }
 
-// RetryConfig 重试配置。
+// RetryConfig Start 首次拉取的重试配置。
+// agollo 首次同步失败后由后台长轮询继续加载，重试即按间隔等待其加载完成；零值表示不重试。
 type RetryConfig struct {
+	// MaxAttempts 首次拉取的总尝试次数（含第一次），0 或 1 表示不重试。
 	MaxAttempts int
-	Interval    time.Duration
+	// Interval 两次尝试的间隔，MaxAttempts 大于 1 时必填。
+	Interval time.Duration
 }
 
 // Config Syncer 配置。
@@ -146,7 +146,6 @@ type Syncer struct {
 	mu        sync.Mutex
 	status    map[string]*NamespaceStatus
 	lastNID   map[string]int64
-	closed    bool
 	closeOnce sync.Once
 }
 
@@ -175,6 +174,12 @@ func validate(cfg Config) error {
 	}
 	if len(cfg.Namespaces) == 0 {
 		return fmt.Errorf("apollo: at least one namespace required")
+	}
+	if cfg.Retry.MaxAttempts < 0 || cfg.Retry.Interval < 0 {
+		return fmt.Errorf("apollo: Retry.MaxAttempts and Retry.Interval must not be negative")
+	}
+	if cfg.Retry.MaxAttempts > 1 && cfg.Retry.Interval == 0 {
+		return fmt.Errorf("apollo: Retry.Interval required when Retry.MaxAttempts > 1")
 	}
 	outputs := make(map[string]string, len(cfg.Namespaces))
 	configured := make(map[string]struct{}, len(cfg.Namespaces))
@@ -243,13 +248,28 @@ func resolveFormat(nsCfg NamespaceConfig) Format {
 }
 
 // Start 连接 Apollo、拉取首份快照、启动变更监听。
+// ctx 用于取消启动过程（连接 Apollo 与重试等待），结束时 Start 关闭已建立的连接并返回 ctx 的错误；Start 返回后不再使用 ctx。
 func (s *Syncer) Start(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("apollo: start canceled: %w", err)
+	}
 	if s.remote == nil {
-		remote, err := newAgolloAdapter(s.cfg)
+		remote, err := startAgolloAdapter(ctx, s.cfg)
 		if err != nil {
 			return err
 		}
 		s.remote = remote
+	}
+
+	// 启用 Watch 时先订阅再拉取首份快照：拉取期间的发布暂存在 worker 中，首次同步完成后再应用，避免丢失。
+	if s.cfg.Watch {
+		s.worker = newWorker(s)
+		sub, err := s.remote.Subscribe(s.worker)
+		if err != nil {
+			s.Close()
+			return fmt.Errorf("apollo: subscribe failed: %w", err)
+		}
+		s.subs = append(s.subs, sub)
 	}
 
 	// 初始化每 namespace 状态，尝试加载 LKG。
@@ -265,14 +285,22 @@ func (s *Syncer) Start(ctx context.Context) error {
 		s.status[key] = st
 	}
 
-	// 逐 namespace 拉取首份快照。
+	snaps, snapErrs, err := s.fetchSnapshots(ctx)
+	if err != nil {
+		s.Close()
+		return err
+	}
+
+	// 逐输出项发布首份快照。
 	// 远端不可用与写盘失败按 Required/LKG 决定是否失败；配置内容错误属人为问题，一律失败。
 	var firstErr error
 	for _, ns := range s.cfg.Namespaces {
 		format := resolveFormat(ns)
 		key := nsKey(ns.Name, format)
-		snap, err := s.remote.Snapshot(ns.Name)
-		if err != nil {
+		snap, ok := snaps[ns.Name]
+		if !ok {
+			err := snapErrs[ns.Name]
+			s.status[key].LastError = err.Error()
 			if s.status[key].Source == "lkg" {
 				continue // 远端失败但 LKG 可用，降级
 			}
@@ -281,7 +309,6 @@ func (s *Syncer) Start(ctx context.Context) error {
 					firstErr = fmt.Errorf("apollo: namespace %s required but unavailable: %w", ns.Name, err)
 				}
 			}
-			s.status[key].LastError = err.Error()
 			continue
 		}
 		data, err := render(ns, snap)
@@ -308,19 +335,54 @@ func (s *Syncer) Start(ctx context.Context) error {
 		return firstErr
 	}
 
-	if !s.cfg.Watch {
-		return nil
+	if s.worker != nil {
+		s.worker.start()
 	}
-
-	// 启用 Watch 时才启动变更监听。
-	s.worker = newWorker(s)
-	sub, err := s.remote.Subscribe(s.worker)
-	if err != nil {
-		s.Close()
-		return fmt.Errorf("apollo: subscribe failed: %w", err)
-	}
-	s.subs = append(s.subs, sub)
 	return nil
+}
+
+// fetchSnapshots 拉取所有 namespace 的首份快照，同名 namespace 只拉取一次。
+// 返回成功的快照与最后一次失败的错误；按 Retry 对失败的 namespace 重试，ctx 结束时返回其错误。
+func (s *Syncer) fetchSnapshots(ctx context.Context) (map[string]Snapshot, map[string]error, error) {
+	snaps := make(map[string]Snapshot)
+	errs := make(map[string]error)
+	seen := make(map[string]bool)
+	var pending []string
+	for _, ns := range s.cfg.Namespaces {
+		if seen[ns.Name] {
+			continue
+		}
+		seen[ns.Name] = true
+		pending = append(pending, ns.Name)
+	}
+	attempts := s.cfg.Retry.MaxAttempts
+	if attempts < 1 {
+		attempts = 1
+	}
+	for attempt := 1; ; attempt++ {
+		var failed []string
+		for _, name := range pending {
+			snap, err := s.remote.Snapshot(name)
+			if err != nil {
+				errs[name] = err
+				failed = append(failed, name)
+				continue
+			}
+			snaps[name] = snap
+			delete(errs, name)
+		}
+		pending = failed
+		if len(pending) == 0 || attempt >= attempts {
+			return snaps, errs, nil
+		}
+		timer := time.NewTimer(s.cfg.Retry.Interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, nil, fmt.Errorf("apollo: start canceled: %w", ctx.Err())
+		case <-timer.C:
+		}
+	}
 }
 
 // handleChange 在 worker goroutine 中处理变更。
@@ -406,33 +468,21 @@ func (s *Syncer) Status() Status {
 }
 
 // Close 停止同步，幂等。
+// 先关闭远端以停止新的回调，再停止 worker；已在途的回调由 worker 在关闭后忽略。
 func (s *Syncer) Close() error {
 	s.closeOnce.Do(func() {
-		s.mu.Lock()
-		s.closed = true
-		s.mu.Unlock()
 		for _, sub := range s.subs {
 			sub.Close()
 		}
 		s.subs = nil
-		if s.worker != nil {
-			s.worker.stop()
-		}
 		if s.remote != nil {
 			s.remote.Close()
 		}
+		if s.worker != nil {
+			s.worker.stop()
+		}
 	})
 	return nil
-}
-
-// contentHashOf 计算 values 的稳定内容 hash，用于状态展示与去重后备。
-func contentHashOf(values map[string]any) string {
-	data, err := json.Marshal(canonicalize(values))
-	if err != nil {
-		return ""
-	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
 }
 
 // canonicalize 返回 key 排序后的 map，保证序列化稳定。

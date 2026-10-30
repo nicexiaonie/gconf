@@ -11,7 +11,7 @@ import (
 	"sync"
 )
 
-// fileStore 实现 SnapshotStore：版本文件 + 稳定 symlink + LKG 索引。
+// fileStore 实现 SnapshotStore：当前版本文件 + 稳定 symlink + LKG 索引，不保留历史版本。
 type fileStore struct {
 	root      string
 	filenames map[string]string
@@ -83,12 +83,10 @@ func formatFromExt(ns string) string {
 }
 
 // Load 校验指定格式的 LKG 文件完整性，返回其 releaseKey。
+// 完整性以版本文件名中的内容 hash 为准：symlink 只会指向已校验并 fsync 的版本文件，
+// 因此即使索引落后（切换 symlink 后、写索引前崩溃）或丢失，该文件仍是有效的 LKG，仅 releaseKey 未知返回空。
 // 不解析内容：跳过解析检查时落地的内容本就可能无法解析，仍属有效的 LKG。
 func (f *fileStore) Load(ns string, format Format) (string, error) {
-	idx, err := f.readIndex(ns, format)
-	if err != nil {
-		return "", err
-	}
 	stable := f.stablePath(ns, format)
 	target, err := os.Readlink(stable)
 	if err != nil {
@@ -98,16 +96,31 @@ func (f *fileStore) Load(ns string, format Format) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if hashBytes(data) != idx.Hash {
+	hash := hashBytes(data)
+	if hash != snapshotHash(target, format) {
 		return "", fmt.Errorf("apollo: LKG hash mismatch for %s:%s", ns, format)
 	}
+	releaseKey := ""
+	if idx, err := f.readIndex(ns, format); err == nil && idx.Hash == hash {
+		releaseKey = idx.ReleaseKey
+	}
 	f.mu.Lock()
-	f.hash[nsKey(ns, format)] = idx.Hash
+	f.hash[nsKey(ns, format)] = hash
 	f.mu.Unlock()
-	return idx.ReleaseKey, nil
+	return releaseKey, nil
 }
 
-// Publish 原子发布某 namespace 的指定格式文件内容。
+// snapshotHash 从版本文件名 <base>-<hash>.<format> 中取出内容 hash，格式不符返回空。
+func snapshotHash(target string, format Format) string {
+	name := strings.TrimSuffix(filepath.Base(target), "."+string(format))
+	dash := strings.LastIndex(name, "-")
+	if dash < 0 {
+		return ""
+	}
+	return name[dash+1:]
+}
+
+// Publish 原子发布某 namespace 的指定格式文件内容，发布后清理不再被引用的版本文件。
 // 内容 hash 相同仅更新 releaseKey 索引，不创建新版本文件或切换 symlink。
 func (f *fileStore) Publish(ns string, format Format, data []byte, releaseKey string) error {
 	hash := hashBytes(data)
@@ -126,7 +139,11 @@ func (f *fileStore) Publish(ns string, format Format, data []byte, releaseKey st
 	}
 	if h, ok := f.hash[key]; ok && h == hash {
 		idx := nsIndex{Hash: hash, Format: formatStr, ReleaseKey: releaseKey}
-		return f.writeIndex(ns, format, idx)
+		if err := f.writeIndex(ns, format, idx); err != nil {
+			return err
+		}
+		f.prune()
+		return nil
 	}
 
 	snapDir := filepath.Join(metadataDir, "snapshots")
@@ -166,7 +183,43 @@ func (f *fileStore) Publish(ns string, format Format, data []byte, releaseKey st
 		return err
 	}
 	f.hash[key] = hash
+	f.prune()
 	return nil
+}
+
+// prune 删除不再被任何稳定路径引用的版本文件，不保留历史版本。调用方需持有 f.mu。
+// 引用关系以 CacheDir 下所有 symlink 的实际指向为准，不会误删其他输出项（含已从配置中移除的输出项）的当前版本；
+// 任一 symlink 无法读取时放弃本次清理。清理失败不影响已完成的发布：残留文件无害，下次发布时会再次清理。
+func (f *fileStore) prune() {
+	entries, err := os.ReadDir(f.root)
+	if err != nil {
+		return
+	}
+	referenced := make(map[string]bool)
+	for _, e := range entries {
+		if e.Type()&os.ModeSymlink == 0 {
+			continue
+		}
+		target, err := os.Readlink(filepath.Join(f.root, e.Name()))
+		if err != nil {
+			return
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(f.root, target)
+		}
+		referenced[filepath.Clean(target)] = true
+	}
+	snapDir := filepath.Join(f.metadataDir(), "snapshots")
+	snaps, err := os.ReadDir(snapDir)
+	if err != nil {
+		return
+	}
+	for _, e := range snaps {
+		path := filepath.Join(snapDir, e.Name())
+		if !referenced[path] {
+			_ = os.Remove(path)
+		}
+	}
 }
 
 func (f *fileStore) CurrentHash(ns string, format Format) string {

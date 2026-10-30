@@ -12,14 +12,21 @@ import (
 	"github.com/nicexiaonie/gconf/apollo"
 )
 
+// 运行前设置 APOLLO_META_SERVER 与 APOLLO_APP_ID，且该应用需存在 JSON 格式的 config.json namespace。
 func main() {
+	metaServer := os.Getenv("APOLLO_META_SERVER")
+	appID := os.Getenv("APOLLO_APP_ID")
+	if metaServer == "" || appID == "" {
+		log.Fatal("请设置环境变量 APOLLO_META_SERVER 与 APOLLO_APP_ID")
+	}
+
 	dir := "./apollo-demo-output"
 	os.RemoveAll(dir)
 
 	syncer, err := apollo.New(apollo.Config{
-		AppID:      "Conduit-Service",
+		AppID:      appID,
 		Cluster:    "default",
-		MetaServer: "http://159.75.184.171:32369",
+		MetaServer: metaServer,
 		CacheDir:   dir,
 		Watch:      true,
 		Namespaces: []apollo.NamespaceConfig{

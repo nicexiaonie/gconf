@@ -1,12 +1,15 @@
 package apollo
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/apolloconfig/agollo/v5/storage"
 )
@@ -130,5 +133,48 @@ func TestOutputFilenameDottedNamespace(t *testing.T) {
 		if got != c.want {
 			t.Errorf("outputFilename(%q, %s) 期望 %q，得到 %q", c.ns, c.format, c.want, got)
 		}
+	}
+}
+
+// TestAdapterSnapshotNotLoaded Apollo 不可用时 agollo 中只有预建的空缓存，不能当作空配置返回，否则会覆盖 LKG
+func TestAdapterSnapshotNotLoaded(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	a, err := newAgolloAdapter(Config{AppID: "app", Cluster: "default", MetaServer: srv.URL, Namespaces: []NamespaceConfig{{Name: "application"}, {Name: "config.json"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	for _, ns := range []string{"application", "config.json"} {
+		if snap, err := a.Snapshot(ns); err == nil {
+			t.Errorf("%s: expected error for unloaded namespace, got %+v", ns, snap)
+		}
+	}
+}
+
+// TestStartAdapterCanceled agollo 启动阻塞时，ctx 结束应让 Start 立即返回
+func TestStartAdapterCanceled(t *testing.T) {
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-block
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(block) })
+
+	s, err := New(Config{AppID: "app", MetaServer: srv.URL, CacheDir: t.TempDir(), Namespaces: []NamespaceConfig{{Name: "application"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if err := s.Start(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded, got %v", err)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("start did not return on ctx deadline")
 	}
 }
