@@ -9,9 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-
-	"github.com/clbanning/mxj"
-	"gopkg.in/yaml.v3"
 )
 
 // fileStore 实现 SnapshotStore：版本文件 + 稳定 symlink + LKG 索引。
@@ -33,7 +30,6 @@ func newFileStore(root string, filenames ...map[string]string) *fileStore {
 type nsIndex struct {
 	Hash       string `json:"hash"`
 	Format     string `json:"format"`
-	IsRaw      bool   `json:"is_raw"`
 	ReleaseKey string `json:"release_key"`
 }
 
@@ -54,11 +50,10 @@ func (f *fileStore) stablePath(ns string, format Format) string {
 }
 
 func nsBase(ns string) string {
-	dot := strings.LastIndex(ns, ".")
-	if dot <= 0 {
+	if !isFileType(ns) {
 		return ns
 	}
-	return ns[:dot]
+	return ns[:strings.LastIndex(ns, ".")]
 }
 
 func nsExt(ns string) string {
@@ -87,53 +82,36 @@ func formatFromExt(ns string) string {
 	return ""
 }
 
-// Load 从指定格式的 LKG 恢复快照。
-func (f *fileStore) Load(ns string, format Format) (Snapshot, error) {
+// Load 校验指定格式的 LKG 文件完整性，返回其 releaseKey。
+// 不解析内容：跳过解析检查时落地的内容本就可能无法解析，仍属有效的 LKG。
+func (f *fileStore) Load(ns string, format Format) (string, error) {
 	idx, err := f.readIndex(ns, format)
 	if err != nil {
-		return Snapshot{}, err
+		return "", err
 	}
 	stable := f.stablePath(ns, format)
 	target, err := os.Readlink(stable)
 	if err != nil {
-		return Snapshot{}, err
+		return "", err
 	}
 	data, err := os.ReadFile(filepath.Join(filepath.Dir(stable), target))
 	if err != nil {
-		return Snapshot{}, err
+		return "", err
 	}
 	if hashBytes(data) != idx.Hash {
-		return Snapshot{}, fmt.Errorf("apollo: LKG hash mismatch for %s:%s", ns, format)
+		return "", fmt.Errorf("apollo: LKG hash mismatch for %s:%s", ns, format)
 	}
 	f.mu.Lock()
 	f.hash[nsKey(ns, format)] = idx.Hash
 	f.mu.Unlock()
-	if idx.IsRaw {
-		return Snapshot{Namespace: ns, RawContent: string(data), ReleaseKey: idx.ReleaseKey}, nil
-	}
-	values, err := decode(data, format)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	return Snapshot{Namespace: ns, Values: values, ReleaseKey: idx.ReleaseKey}, nil
+	return idx.ReleaseKey, nil
 }
 
-// Publish 原子发布某 namespace 的指定格式快照。
+// Publish 原子发布某 namespace 的指定格式文件内容。
 // 内容 hash 相同仅更新 releaseKey 索引，不创建新版本文件或切换 symlink。
-func (f *fileStore) Publish(snap Snapshot, format Format) error {
-	var data []byte
-	isRaw := snap.Values == nil
-	if isRaw {
-		data = []byte(snap.RawContent)
-	} else {
-		var err error
-		data, err = encode(snap.Values, format)
-		if err != nil {
-			return fmt.Errorf("encode: %w", err)
-		}
-	}
+func (f *fileStore) Publish(ns string, format Format, data []byte, releaseKey string) error {
 	hash := hashBytes(data)
-	key := nsKey(snap.Namespace, format)
+	key := nsKey(ns, format)
 	formatStr := string(format)
 
 	f.mu.Lock()
@@ -147,8 +125,8 @@ func (f *fileStore) Publish(snap Snapshot, format Format) error {
 		return err
 	}
 	if h, ok := f.hash[key]; ok && h == hash {
-		idx := nsIndex{Hash: hash, Format: formatStr, IsRaw: isRaw, ReleaseKey: snap.ReleaseKey}
-		return f.writeIndex(snap.Namespace, format, idx)
+		idx := nsIndex{Hash: hash, Format: formatStr, ReleaseKey: releaseKey}
+		return f.writeIndex(ns, format, idx)
 	}
 
 	snapDir := filepath.Join(metadataDir, "snapshots")
@@ -156,7 +134,7 @@ func (f *fileStore) Publish(snap Snapshot, format Format) error {
 		return err
 	}
 
-	base := strings.TrimSuffix(filepath.Base(f.stablePath(snap.Namespace, format)), filepath.Ext(f.stablePath(snap.Namespace, format)))
+	base := strings.TrimSuffix(filepath.Base(f.stablePath(ns, format)), filepath.Ext(f.stablePath(ns, format)))
 	snapFile := fmt.Sprintf("%s-%s.%s", base, hash, formatStr)
 	snapPath := filepath.Join(snapDir, snapFile)
 	if err := os.WriteFile(snapPath, data, 0o644); err != nil {
@@ -165,13 +143,8 @@ func (f *fileStore) Publish(snap Snapshot, format Format) error {
 	if err := fsyncFile(snapPath); err != nil {
 		return err
 	}
-	if !isRaw {
-		if _, err := decode(data, format); err != nil {
-			return fmt.Errorf("validate: %w", err)
-		}
-	}
 
-	stable := f.stablePath(snap.Namespace, format)
+	stable := f.stablePath(ns, format)
 	tmpLink := stable + ".tmp"
 	_ = os.Remove(tmpLink)
 	relTarget, err := filepath.Rel(filepath.Dir(stable), snapPath)
@@ -188,8 +161,8 @@ func (f *fileStore) Publish(snap Snapshot, format Format) error {
 		return err
 	}
 
-	idx := nsIndex{Hash: hash, Format: formatStr, IsRaw: isRaw, ReleaseKey: snap.ReleaseKey}
-	if err := f.writeIndex(snap.Namespace, format, idx); err != nil {
+	idx := nsIndex{Hash: hash, Format: formatStr, ReleaseKey: releaseKey}
+	if err := f.writeIndex(ns, format, idx); err != nil {
 		return err
 	}
 	f.hash[key] = hash
@@ -230,41 +203,6 @@ func (f *fileStore) writeIndex(ns string, format Format, idx nsIndex) error {
 		return err
 	}
 	return fsyncDir(f.metadataDir())
-}
-
-func encode(values map[string]any, format Format) ([]byte, error) {
-	clean := canonicalize(values)
-	switch format {
-	case FormatYAML, FormatYML:
-		return yaml.Marshal(clean)
-	case FormatXML:
-		return mxj.Map(clean).XmlIndent("", "    ")
-	default:
-		return json.MarshalIndent(clean, "", "    ")
-	}
-}
-
-func decode(data []byte, format Format) (map[string]any, error) {
-	switch format {
-	case FormatYAML, FormatYML:
-		out := make(map[string]any)
-		if err := yaml.Unmarshal(data, &out); err != nil {
-			return nil, err
-		}
-		return out, nil
-	case FormatXML:
-		m, err := mxj.NewMapXml(data)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any(m), nil
-	default:
-		out := make(map[string]any)
-		if err := json.Unmarshal(data, &out); err != nil {
-			return nil, err
-		}
-		return out, nil
-	}
 }
 
 func hashBytes(data []byte) string {

@@ -10,50 +10,65 @@ import (
 func TestStorePublishAndLoad(t *testing.T) {
 	dir := t.TempDir()
 	s := newFileStore(dir)
-	snap := Snapshot{Namespace: "application", Values: map[string]any{"k": "v"}, ReleaseKey: "r1"}
-	if err := s.Publish(snap, FormatJSON); err != nil {
+	if err := s.Publish("application", FormatProperties, []byte("k=v\n"), "r1"); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
-	loaded, err := s.Load("application", FormatJSON)
+	data, err := os.ReadFile(filepath.Join(dir, "application.properties"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "k=v\n" {
+		t.Fatalf("got %q", data)
+	}
+	releaseKey, err := newFileStore(dir).Load("application", FormatProperties)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if loaded.Values["k"] != "v" {
-		t.Fatalf("got %v", loaded.Values)
-	}
-	if loaded.ReleaseKey != "r1" {
-		t.Fatalf("releaseKey %v", loaded.ReleaseKey)
+	if releaseKey != "r1" {
+		t.Fatalf("releaseKey %v", releaseKey)
 	}
 }
 
-func TestStorePublishJSONIndented(t *testing.T) {
+// TestStoreLoadDoesNotParse 跳过解析检查时落地的内容可能无法解析，仍应作为有效 LKG
+func TestStoreLoadDoesNotParse(t *testing.T) {
 	dir := t.TempDir()
 	s := newFileStore(dir)
-	snap := Snapshot{Namespace: "application", Values: map[string]any{
-		"app": map[string]any{"name": "demo", "version": "1.0.0"},
-	}}
-	if err := s.Publish(snap, FormatJSON); err != nil {
+	if err := s.Publish("config.json", FormatJSON, []byte("{not json"), "r1"); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "application.json"))
+	if _, err := newFileStore(dir).Load("config.json", FormatJSON); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+}
+
+func TestStoreLoadHashMismatch(t *testing.T) {
+	dir := t.TempDir()
+	s := newFileStore(dir)
+	if err := s.Publish("ns", FormatJSON, []byte(`{"k":"v"}`), ""); err != nil {
+		t.Fatal(err)
+	}
+	stable := filepath.Join(dir, "ns.json")
+	target, err := os.Readlink(stable)
 	if err != nil {
 		t.Fatal(err)
 	}
-	content := string(data)
-	if !strings.Contains(content, "\n    \"app\": {") || !strings.Contains(content, "\n        \"name\": \"demo\"") {
-		t.Fatalf("json is not indented:\n%s", content)
+	if err := os.WriteFile(filepath.Join(dir, target), []byte(`{"k":"tampered"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newFileStore(dir).Load("ns", FormatJSON); err == nil {
+		t.Fatal("expected hash mismatch error")
 	}
 }
 
 func TestStorePublishDedup(t *testing.T) {
 	dir := t.TempDir()
 	s := newFileStore(dir)
-	snap := Snapshot{Namespace: "ns", Values: map[string]any{"k": "v"}}
-	if err := s.Publish(snap, FormatJSON); err != nil {
+	data := []byte(`{"k":"v"}`)
+	if err := s.Publish("ns", FormatJSON, data, ""); err != nil {
 		t.Fatal(err)
 	}
 	first := s.CurrentHash("ns", FormatJSON)
-	if err := s.Publish(snap, FormatJSON); err != nil {
+	if err := s.Publish("ns", FormatJSON, data, ""); err != nil {
 		t.Fatal(err)
 	}
 	if s.CurrentHash("ns", FormatJSON) != first {
@@ -61,56 +76,10 @@ func TestStorePublishDedup(t *testing.T) {
 	}
 }
 
-func TestStorePublishYAML(t *testing.T) {
-	dir := t.TempDir()
-	s := newFileStore(dir)
-	snap := Snapshot{Namespace: "ns", Values: map[string]any{"k": "v"}}
-	if err := s.Publish(snap, FormatYAML); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := s.Load("ns", FormatYAML)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if loaded.Values["k"] != "v" {
-		t.Fatalf("got %v", loaded.Values)
-	}
-}
-
-func TestStorePublishXMLIndented(t *testing.T) {
-	dir := t.TempDir()
-	s := newFileStore(dir)
-	snap := Snapshot{
-		Namespace: "config.json",
-		Values: map[string]any{
-			"app": map[string]any{"name": "demo", "version": "1.0.0"},
-		},
-	}
-	if err := s.Publish(snap, FormatXML); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(filepath.Join(dir, "config.xml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-	if !strings.Contains(content, "\n    <name>demo</name>") || !strings.Contains(content, "\n    <version>1.0.0</version>") {
-		t.Fatalf("xml is not indented:\n%s", content)
-	}
-	loaded, err := s.Load("config.json", FormatXML)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if len(loaded.Values) == 0 {
-		t.Fatal("loaded xml is empty")
-	}
-}
-
 func TestStoreSymlinkValid(t *testing.T) {
 	dir := t.TempDir()
 	s := newFileStore(dir)
-	snap := Snapshot{Namespace: "ns", Values: map[string]any{"k": "v"}}
-	if err := s.Publish(snap, FormatJSON); err != nil {
+	if err := s.Publish("ns", FormatJSON, []byte(`{"k":"v"}`), ""); err != nil {
 		t.Fatal(err)
 	}
 	stable := filepath.Join(dir, "ns.json")
@@ -134,12 +103,12 @@ func TestStoreLoadNoLKG(t *testing.T) {
 func TestStoreNewVersionDoesNotBreakOld(t *testing.T) {
 	dir := t.TempDir()
 	s := newFileStore(dir)
-	if err := s.Publish(Snapshot{Namespace: "ns", Values: map[string]any{"k": "v1"}}, FormatJSON); err != nil {
+	if err := s.Publish("ns", FormatJSON, []byte(`{"k":"v1"}`), ""); err != nil {
 		t.Fatal(err)
 	}
 	stable := filepath.Join(dir, "ns.json")
 	first, _ := os.Readlink(stable)
-	if err := s.Publish(Snapshot{Namespace: "ns", Values: map[string]any{"k": "v2"}}, FormatJSON); err != nil {
+	if err := s.Publish("ns", FormatJSON, []byte(`{"k":"v2"}`), ""); err != nil {
 		t.Fatal(err)
 	}
 	second, _ := os.Readlink(stable)
@@ -155,11 +124,10 @@ func TestStoreNewVersionDoesNotBreakOld(t *testing.T) {
 func TestStoreMultiFormatLKG(t *testing.T) {
 	dir := t.TempDir()
 	s := newFileStore(dir)
-	values := map[string]any{"app": map[string]any{"version": "1.0.0"}}
-	if err := s.Publish(Snapshot{Namespace: "config.json", Values: values, ReleaseKey: "r-yaml"}, FormatYAML); err != nil {
+	if err := s.Publish("config.json", FormatYAML, []byte("app:\n  version: 1.0.0\n"), "r-yaml"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Publish(Snapshot{Namespace: "config.json", Values: values, ReleaseKey: "r-xml"}, FormatXML); err != nil {
+	if err := s.Publish("config.json", FormatXML, []byte("<app><version>1.0.0</version></app>"), "r-xml"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -180,16 +148,16 @@ func TestStoreMultiFormatLKG(t *testing.T) {
 
 	// 重建 store，模拟进程重启后分别恢复两种格式。
 	reloaded := newFileStore(dir)
-	yamlSnap, err := reloaded.Load("config.json", FormatYAML)
+	yamlKey, err := reloaded.Load("config.json", FormatYAML)
 	if err != nil {
 		t.Fatalf("load yaml: %v", err)
 	}
-	xmlSnap, err := reloaded.Load("config.json", FormatXML)
+	xmlKey, err := reloaded.Load("config.json", FormatXML)
 	if err != nil {
 		t.Fatalf("load xml: %v", err)
 	}
-	if yamlSnap.ReleaseKey != "r-yaml" || xmlSnap.ReleaseKey != "r-xml" {
-		t.Fatalf("releaseKey mixed: yaml=%s xml=%s", yamlSnap.ReleaseKey, xmlSnap.ReleaseKey)
+	if yamlKey != "r-yaml" || xmlKey != "r-xml" {
+		t.Fatalf("releaseKey mixed: yaml=%s xml=%s", yamlKey, xmlKey)
 	}
 	if reloaded.CurrentHash("config.json", FormatYAML) == reloaded.CurrentHash("config.json", FormatXML) {
 		t.Fatal("different target formats should have different file hashes")
@@ -199,8 +167,8 @@ func TestStoreMultiFormatLKG(t *testing.T) {
 func TestStoreReleaseKeyOnlyUpdate(t *testing.T) {
 	dir := t.TempDir()
 	s := newFileStore(dir)
-	values := map[string]any{"k": "v"}
-	if err := s.Publish(Snapshot{Namespace: "ns", Values: values, ReleaseKey: "r1"}, FormatJSON); err != nil {
+	data := []byte(`{"k":"v"}`)
+	if err := s.Publish("ns", FormatJSON, data, "r1"); err != nil {
 		t.Fatal(err)
 	}
 	stable := filepath.Join(dir, "ns.json")
@@ -210,22 +178,22 @@ func TestStoreReleaseKeyOnlyUpdate(t *testing.T) {
 	}
 	firstHash := s.CurrentHash("ns", FormatJSON)
 
-	if err := s.Publish(Snapshot{Namespace: "ns", Values: values, ReleaseKey: "r2"}, FormatJSON); err != nil {
+	if err := s.Publish("ns", FormatJSON, data, "r2"); err != nil {
 		t.Fatal(err)
 	}
 	secondTarget, err := os.Readlink(stable)
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := newFileStore(dir).Load("ns", FormatJSON)
+	releaseKey, err := newFileStore(dir).Load("ns", FormatJSON)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if firstTarget != secondTarget {
 		t.Fatal("releaseKey-only update should not switch snapshot")
 	}
-	if loaded.ReleaseKey != "r2" {
-		t.Fatalf("releaseKey not updated: %s", loaded.ReleaseKey)
+	if releaseKey != "r2" {
+		t.Fatalf("releaseKey not updated: %s", releaseKey)
 	}
 	if s.CurrentHash("ns", FormatJSON) != firstHash {
 		t.Fatal("hash changed on releaseKey-only update")
@@ -234,32 +202,27 @@ func TestStoreReleaseKeyOnlyUpdate(t *testing.T) {
 
 func TestStoreCustomFilename(t *testing.T) {
 	dir := t.TempDir()
-	filenames := map[string]string{nsKey("config.json", FormatYAML): "application.yaml"}
+	filenames := map[string]string{nsKey("config.json", FormatYAML): "application.conf"}
 	s := newFileStore(dir, filenames)
-	if err := s.Publish(Snapshot{Namespace: "config.json", Values: map[string]any{"k": "v"}}, FormatYAML); err != nil {
+	if err := s.Publish("config.json", FormatYAML, []byte("k: v\n"), "r1"); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "application.yaml"))
+	data, err := os.ReadFile(filepath.Join(dir, "application.conf"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "k: v") {
+	if string(data) != "k: v\n" {
 		t.Fatalf("unexpected content: %s", data)
 	}
-	reloaded := newFileStore(dir, filenames)
-	loaded, err := reloaded.Load("config.json", FormatYAML)
-	if err != nil {
+	if _, err := newFileStore(dir, filenames).Load("config.json", FormatYAML); err != nil {
 		t.Fatal(err)
-	}
-	if loaded.Values["k"] != "v" {
-		t.Fatalf("got %v", loaded.Values)
 	}
 }
 
 func TestStoreHashMatchesFileBytes(t *testing.T) {
 	dir := t.TempDir()
 	s := newFileStore(dir)
-	if err := s.Publish(Snapshot{Namespace: "config.json", Values: map[string]any{"k": "v"}}, FormatYAML); err != nil {
+	if err := s.Publish("config.json", FormatYAML, []byte("k: v\n"), ""); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "config.yaml"))

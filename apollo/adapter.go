@@ -1,17 +1,24 @@
 package apollo
 
 import (
-	"encoding/json"
 	"fmt"
-	"strings"
 	"sync"
 
 	agollo "github.com/apolloconfig/agollo/v5"
+	"github.com/apolloconfig/agollo/v5/constant"
 	"github.com/apolloconfig/agollo/v5/env/config"
+	"github.com/apolloconfig/agollo/v5/extension"
 	"github.com/apolloconfig/agollo/v5/storage"
-	"github.com/clbanning/mxj"
-	"gopkg.in/yaml.v3"
+	"github.com/apolloconfig/agollo/v5/utils/parse/normal"
 )
+
+// agollo 默认会把 yaml/yml namespace 预解析为扁平键值并丢弃 "content" 原文，
+// 这里改为不预解析（同 json），保留原文由本模块统一解析。
+// 该注册对整个进程生效，进程内其他直接使用 agollo 读 yaml 的代码将拿不到扁平键值。
+func init() {
+	extension.AddFormatParser(constant.YAML, &normal.Parser{})
+	extension.AddFormatParser(constant.YML, &normal.Parser{})
+}
 
 // sdkClient 隔离 agollo.Client 的窄接口，便于测试。
 type sdkClient interface {
@@ -66,11 +73,11 @@ func joinNames(nss []NamespaceConfig) string {
 	return out
 }
 
-// isFileType 判断 namespace 是否为文件型（名带后缀）。
-// Apollo 规则：非 properties namespace 必须带后缀（.json/.yaml/.xml 等）。
+// isFileType 判断 namespace 是否为文件型（名带已知格式后缀）。
+// 与 Apollo/agollo 一致：仅 .json/.yaml/.yml/.xml/.txt/.properties 视为文件型，
+// 其余带点名称（如公共 namespace 的部门前缀 TEST1.redis）按 properties 型处理。
 func isFileType(ns string) bool {
-	dot := strings.LastIndex(ns, ".")
-	return dot > 0 && dot < len(ns)-1
+	return formatFromExt(ns) != ""
 }
 
 func (a *agolloAdapter) releaseKey(ns string) string {
@@ -104,40 +111,8 @@ func (a *agolloAdapter) Snapshot(ns string) (Snapshot, error) {
 		return Snapshot{}, fmt.Errorf("namespace %q get content: %w", ns, err)
 	}
 	content, _ := val.(string)
-	src := formatFromExt(ns)
-	if src == "txt" || src == "properties" {
-		// 纯文本/properties 原样落盘，不解析
-		return Snapshot{Namespace: ns, RawContent: content, ReleaseKey: a.releaseKey(ns)}, nil
-	}
-	values, err := parseContent(content, src)
-	if err != nil {
-		return Snapshot{}, fmt.Errorf("parse namespace %q: %w", ns, err)
-	}
-	return Snapshot{Namespace: ns, Values: values, ReleaseKey: a.releaseKey(ns)}, nil
-}
-
-// parseContent 将原始文本按源格式解析为 map。
-func parseContent(content, format string) (map[string]any, error) {
-	out := make(map[string]any)
-	switch format {
-	case "json":
-		if err := json.Unmarshal([]byte(content), &out); err != nil {
-			return nil, err
-		}
-		return out, nil
-	case "yaml", "yml":
-		if err := yaml.Unmarshal([]byte(content), &out); err != nil {
-			return nil, err
-		}
-		return out, nil
-	case "xml":
-		m, err := mxj.NewMapXml([]byte(content))
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any(m), nil
-	}
-	return nil, fmt.Errorf("unsupported source format: %s", format)
+	// 原文交由 render 按配置原样落地或解析转换，此处不解析
+	return Snapshot{Namespace: ns, RawContent: content, ReleaseKey: a.releaseKey(ns)}, nil
 }
 
 func (a *agolloAdapter) Subscribe(sink ChangeSink) (Subscription, error) {
@@ -176,7 +151,7 @@ type changeListener struct {
 // OnChange 增量变更事件，OnNewestChange 已提供完整快照，此处不处理。
 func (l *changeListener) OnChange(event *storage.ChangeEvent) {}
 
-// OnNewestChange 收到完整 namespace 快照，按类型转换后投递。
+// OnNewestChange 收到完整 namespace 快照，按 namespace 类型投递键值或原文。
 func (l *changeListener) OnNewestChange(event *storage.FullChangeEvent) {
 	if l.sink == nil || event == nil {
 		return
@@ -195,17 +170,7 @@ func (l *changeListener) OnNewestChange(event *storage.FullChangeEvent) {
 		return
 	}
 	content, _ := event.Changes["content"].(string)
-	src := formatFromExt(ns)
-	if src == "txt" || src == "properties" {
-		l.sink.OnChange(Change{Namespace: ns, RawContent: content, ReleaseKey: releaseKey, NotificationID: event.NotificationID})
-		return
-	}
-	values, err := parseContent(content, src)
-	if err != nil {
-		// 解析失败则丢弃本次变更，保留旧配置
-		return
-	}
-	l.sink.OnChange(Change{Namespace: ns, Values: values, ReleaseKey: releaseKey, NotificationID: event.NotificationID})
+	l.sink.OnChange(Change{Namespace: ns, RawContent: content, ReleaseKey: releaseKey, NotificationID: event.NotificationID})
 }
 
 type adapterSubscription struct{}

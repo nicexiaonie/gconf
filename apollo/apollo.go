@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 )
@@ -25,6 +24,10 @@ const (
 	FormatYML Format = "yml"
 	// FormatXML 以 XML 输出。
 	FormatXML Format = "xml"
+	// FormatTOML 以 TOML 输出（仅作为转换目标）。
+	FormatTOML Format = "toml"
+	// FormatProperties 以 properties 输出，也是 properties 型 namespace 的原样落地格式。
+	FormatProperties Format = "properties"
 	// FormatTXT 以纯文本原样输出（不解析不转格式）。
 	FormatTXT Format = "txt"
 )
@@ -35,10 +38,13 @@ type NamespaceConfig struct {
 	Name string
 	// Required 为 true 时，无远端且无 LKG 则 Start 失败。
 	Required bool
-	// Format 该 namespace 输出格式，空则用全局 Config.Format。
+	// Format 目标格式。为空或与源格式相同时原样落地：文件型写 Apollo 原文，
+	// properties 型写为 properties 文件；与源格式不同时解析后转换。
 	Format Format
-	// Filename 输出文件名（包含扩展名），空则根据 Name 和输出格式生成。
+	// Filename 输出文件名，严格按配置写入，不校验扩展名；空则根据 Name 和目标格式生成。
 	Filename string
+	// SkipValidate 为 true 时，原样落地前跳过解析检查；仅适用于原样落地，配置转换时不可用。
+	SkipValidate bool
 }
 
 // RetryConfig 重试配置。
@@ -55,9 +61,8 @@ type Config struct {
 	Secret     string
 	CacheDir   string // 本地缓存与 LKG 根目录
 	Namespaces []NamespaceConfig
-	Format     Format // 全局默认输出格式，默认 json
-	Watch      bool   // 是否监听 Apollo 变更并持续热更新，默认 false
-	Merge      bool   // 合并多 namespace 为单文件，默认 false（本期仅占位）
+	Watch      bool // 是否监听 Apollo 变更并持续热更新，默认 false
+	Merge      bool // 合并多 namespace 为单文件，默认 false（本期仅占位）
 	Retry      RetryConfig
 }
 
@@ -114,8 +119,10 @@ type Subscription interface {
 
 // SnapshotStore 本地快照存储抽象。
 type SnapshotStore interface {
-	Load(ns string, format Format) (Snapshot, error)
-	Publish(snap Snapshot, format Format) error
+	// Load 校验 LKG 完整性并返回其 releaseKey。
+	Load(ns string, format Format) (string, error)
+	// Publish 原子写入已生成的文件内容。
+	Publish(ns string, format Format, data []byte, releaseKey string) error
 	CurrentHash(ns string, format Format) string
 }
 
@@ -148,9 +155,6 @@ func New(cfg Config) (*Syncer, error) {
 	if err := validate(cfg); err != nil {
 		return nil, err
 	}
-	if cfg.Format == "" {
-		cfg.Format = FormatJSON
-	}
 	return &Syncer{
 		cfg:     cfg,
 		store:   newFileStore(cfg.CacheDir, outputFilenames(cfg)),
@@ -178,7 +182,21 @@ func validate(cfg Config) error {
 		if ns.Name == "" {
 			return fmt.Errorf("apollo: namespace[%d].Name required", i)
 		}
-		format := resolveFormat(ns, cfg.Format)
+		if ns.Format != "" && !isKnownFormat(ns.Format) {
+			return fmt.Errorf("apollo: namespace[%d].Format %q unsupported", i, ns.Format)
+		}
+		format := resolveFormat(ns)
+		if src := sourceFormat(ns.Name); format != src {
+			if isFileType(ns.Name) && !isStructured(src) {
+				return fmt.Errorf("apollo: namespace %s (%s) supports raw output only, cannot convert to %s", ns.Name, src, format)
+			}
+			if format == FormatTXT {
+				return fmt.Errorf("apollo: namespace %s cannot convert to %s", ns.Name, format)
+			}
+			if ns.SkipValidate {
+				return fmt.Errorf("apollo: namespace %s SkipValidate applies to raw output only, but converts %s to %s", ns.Name, src, format)
+			}
+		}
 		key := nsKey(ns.Name, format)
 		if _, ok := configured[key]; ok {
 			return fmt.Errorf("apollo: namespace %s with format %s configured more than once", ns.Name, format)
@@ -199,7 +217,7 @@ func validate(cfg Config) error {
 func outputFilenames(cfg Config) map[string]string {
 	filenames := make(map[string]string, len(cfg.Namespaces))
 	for _, ns := range cfg.Namespaces {
-		format := resolveFormat(ns, cfg.Format)
+		format := resolveFormat(ns)
 		filename, _ := outputFilename(ns, format)
 		filenames[nsKey(ns.Name, format)] = filename
 	}
@@ -213,31 +231,15 @@ func outputFilename(ns NamespaceConfig, format Format) (string, error) {
 	if filepath.Base(ns.Filename) != ns.Filename || ns.Filename == "." || ns.Filename == ".." {
 		return "", fmt.Errorf("must be a file name without a directory")
 	}
-	ext := strings.TrimPrefix(filepath.Ext(ns.Filename), ".")
-	if ext == "" {
-		return "", fmt.Errorf("must include .%s extension", format)
-	}
-	if ext != string(format) {
-		return "", fmt.Errorf("extension .%s does not match format %s", ext, format)
-	}
 	return ns.Filename, nil
 }
 
-// resolveFormat 决定 namespace 的目标输出格式。
-// 优先级：NamespaceConfig.Format > 文件型后缀格式（保持原格式）> Config.Format > json
-func resolveFormat(nsCfg NamespaceConfig, global Format) Format {
+// resolveFormat 决定 namespace 的目标格式：配置了 Format 用配置值，否则为源格式（原样落地）。
+func resolveFormat(nsCfg NamespaceConfig) Format {
 	if nsCfg.Format != "" {
 		return nsCfg.Format
 	}
-	if isFileType(nsCfg.Name) {
-		if f := formatFromExt(nsCfg.Name); f != "" {
-			return Format(f)
-		}
-	}
-	if global != "" {
-		return global
-	}
-	return FormatJSON
+	return sourceFormat(nsCfg.Name)
 }
 
 // Start 连接 Apollo、拉取首份快照、启动变更监听。
@@ -252,11 +254,11 @@ func (s *Syncer) Start(ctx context.Context) error {
 
 	// 初始化每 namespace 状态，尝试加载 LKG。
 	for _, ns := range s.cfg.Namespaces {
-		format := resolveFormat(ns, s.cfg.Format)
+		format := resolveFormat(ns)
 		key := nsKey(ns.Name, format)
 		st := &NamespaceStatus{Namespace: ns.Name, Format: format, Source: "empty"}
-		if lkg, err := s.store.Load(ns.Name, format); err == nil {
-			st.ReleaseKey = lkg.ReleaseKey
+		if releaseKey, err := s.store.Load(ns.Name, format); err == nil {
+			st.ReleaseKey = releaseKey
 			st.Hash = s.store.CurrentHash(ns.Name, format)
 			st.Source = "lkg"
 		}
@@ -264,9 +266,10 @@ func (s *Syncer) Start(ctx context.Context) error {
 	}
 
 	// 逐 namespace 拉取首份快照。
+	// 远端不可用与写盘失败按 Required/LKG 决定是否失败；配置内容错误属人为问题，一律失败。
 	var firstErr error
 	for _, ns := range s.cfg.Namespaces {
-		format := resolveFormat(ns, s.cfg.Format)
+		format := resolveFormat(ns)
 		key := nsKey(ns.Name, format)
 		snap, err := s.remote.Snapshot(ns.Name)
 		if err != nil {
@@ -281,7 +284,15 @@ func (s *Syncer) Start(ctx context.Context) error {
 			s.status[key].LastError = err.Error()
 			continue
 		}
-		if err := s.store.Publish(snap, format); err != nil {
+		data, err := render(ns, snap)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("apollo: namespace %s invalid content: %w", ns.Name, err)
+			}
+			s.status[key].LastError = err.Error()
+			continue
+		}
+		if err := s.store.Publish(ns.Name, format, data, snap.ReleaseKey); err != nil {
 			if ns.Required && s.status[key].Source != "lkg" {
 				if firstErr == nil {
 					firstErr = fmt.Errorf("apollo: namespace %s publish failed: %w", ns.Name, err)
@@ -330,7 +341,7 @@ func (s *Syncer) handleChange(ch Change) {
 		if nsCfg.Name != ch.Namespace {
 			continue
 		}
-		format := resolveFormat(nsCfg, s.cfg.Format)
+		format := resolveFormat(nsCfg)
 		snap := Snapshot{
 			Namespace:      ch.Namespace,
 			Values:         ch.Values,
@@ -338,7 +349,12 @@ func (s *Syncer) handleChange(ch Change) {
 			ReleaseKey:     ch.ReleaseKey,
 			NotificationID: ch.NotificationID,
 		}
-		if err := s.store.Publish(snap, format); err != nil {
+		data, err := render(nsCfg, snap)
+		if err != nil {
+			s.markError(ch.Namespace, format, err)
+			continue
+		}
+		if err := s.store.Publish(ch.Namespace, format, data, snap.ReleaseKey); err != nil {
 			s.markError(ch.Namespace, format, err)
 			continue
 		}
@@ -380,7 +396,7 @@ func (s *Syncer) Status() Status {
 	defer s.mu.Unlock()
 	out := Status{}
 	for _, ns := range s.cfg.Namespaces {
-		format := resolveFormat(ns, s.cfg.Format)
+		format := resolveFormat(ns)
 		key := nsKey(ns.Name, format)
 		if st := s.status[key]; st != nil {
 			out.Namespaces = append(out.Namespaces, *st)

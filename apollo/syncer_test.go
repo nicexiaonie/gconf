@@ -85,7 +85,6 @@ func TestSyncerMultiNamespace(t *testing.T) {
 		AppID:      "app",
 		MetaServer: "http://x",
 		CacheDir:   dir,
-		Format:     FormatJSON,
 		Namespaces: []NamespaceConfig{{Name: "ns1"}, {Name: "ns2"}},
 	}
 	s := newTestSyncer(t, cfg, remote)
@@ -94,10 +93,10 @@ func TestSyncerMultiNamespace(t *testing.T) {
 	}
 	defer s.Close()
 
-	if _, err := readNSFile(dir, "ns1", "ns1.json"); err != nil {
+	if _, err := readNSFile(dir, "ns1", "ns1.properties"); err != nil {
 		t.Fatalf("ns1 not published: %v", err)
 	}
-	if _, err := readNSFile(dir, "ns2", "ns2.json"); err != nil {
+	if _, err := readNSFile(dir, "ns2", "ns2.properties"); err != nil {
 		t.Fatalf("ns2 not published: %v", err)
 	}
 }
@@ -105,7 +104,7 @@ func TestSyncerMultiNamespace(t *testing.T) {
 func TestSyncerCustomFilename(t *testing.T) {
 	dir := t.TempDir()
 	remote := newFakeRemote()
-	remote.snaps["config.json"] = Snapshot{Namespace: "config.json", Values: map[string]any{"k": "v"}}
+	remote.snaps["config.json"] = Snapshot{Namespace: "config.json", RawContent: `{"k": "v"}`}
 	cfg := Config{
 		AppID:      "app",
 		MetaServer: "http://x",
@@ -132,8 +131,6 @@ func TestValidateFilename(t *testing.T) {
 		name       string
 		namespaces []NamespaceConfig
 	}{
-		{name: "missing extension", namespaces: []NamespaceConfig{{Name: "ns", Format: FormatJSON, Filename: "config"}}},
-		{name: "extension mismatch", namespaces: []NamespaceConfig{{Name: "ns", Format: FormatJSON, Filename: "config.yaml"}}},
 		{name: "directory", namespaces: []NamespaceConfig{{Name: "ns", Format: FormatJSON, Filename: "sub/config.json"}}},
 		{name: "conflict", namespaces: []NamespaceConfig{{Name: "ns1", Format: FormatJSON, Filename: "config.json"}, {Name: "ns2", Format: FormatJSON, Filename: "config.json"}}},
 		{name: "duplicate namespace format", namespaces: []NamespaceConfig{{Name: "ns", Format: FormatJSON, Filename: "one.json"}, {Name: "ns", Format: FormatJSON, Filename: "two.json"}}},
@@ -168,7 +165,7 @@ func TestSyncerRequiredFailsWithoutLKG(t *testing.T) {
 func TestSyncerDegradedWithLKG(t *testing.T) {
 	dir := t.TempDir()
 	store := newFileStore(dir)
-	if err := store.Publish(Snapshot{Namespace: "ns", Values: map[string]any{"k": "lkg"}}, FormatJSON); err != nil {
+	if err := store.Publish("ns", FormatProperties, []byte("k=lkg\n"), ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -201,7 +198,6 @@ func TestSyncerChangeUpdates(t *testing.T) {
 		AppID:      "app",
 		MetaServer: "http://x",
 		CacheDir:   dir,
-		Format:     FormatJSON,
 		Watch:      true,
 		Namespaces: []NamespaceConfig{{Name: "ns"}},
 	}
@@ -212,7 +208,7 @@ func TestSyncerChangeUpdates(t *testing.T) {
 	defer s.Close()
 
 	remote.emit(Change{Namespace: "ns", Values: map[string]any{"k": "v2"}, NotificationID: 2})
-	if !waitForValue(dir, "ns", "ns.json", "v2") {
+	if !waitForValue(dir, "ns", "ns.properties", "v2") {
 		t.Fatalf("change not applied")
 	}
 }
@@ -225,7 +221,6 @@ func TestSyncerDropStaleNotification(t *testing.T) {
 		AppID:      "app",
 		MetaServer: "http://x",
 		CacheDir:   dir,
-		Format:     FormatJSON,
 		Watch:      true,
 		Namespaces: []NamespaceConfig{{Name: "ns"}},
 	}
@@ -236,13 +231,13 @@ func TestSyncerDropStaleNotification(t *testing.T) {
 	defer s.Close()
 
 	remote.emit(Change{Namespace: "ns", Values: map[string]any{"k": "new"}, NotificationID: 5})
-	if !waitForValue(dir, "ns", "ns.json", "new") {
+	if !waitForValue(dir, "ns", "ns.properties", "new") {
 		t.Fatalf("new version not applied")
 	}
 	// 旧版本应被丢弃
 	remote.emit(Change{Namespace: "ns", Values: map[string]any{"k": "old"}, NotificationID: 3})
 	time.Sleep(100 * time.Millisecond)
-	data, _ := readNSFile(dir, "ns", "ns.json")
+	data, _ := readNSFile(dir, "ns", "ns.properties")
 	if strings.Contains(string(data), "old") {
 		t.Fatalf("stale notification applied: %s", data)
 	}
@@ -256,7 +251,6 @@ func TestSyncerWatchDisabledDoesNotApplyChanges(t *testing.T) {
 		AppID:      "app",
 		MetaServer: "http://x",
 		CacheDir:   dir,
-		Format:     FormatJSON,
 		Watch:      false,
 		Namespaces: []NamespaceConfig{{Name: "ns"}},
 	}
@@ -268,7 +262,7 @@ func TestSyncerWatchDisabledDoesNotApplyChanges(t *testing.T) {
 
 	remote.emit(Change{Namespace: "ns", Values: map[string]any{"k": "v2"}, NotificationID: 2})
 	time.Sleep(100 * time.Millisecond)
-	data, err := readNSFile(dir, "ns", "ns.json")
+	data, err := readNSFile(dir, "ns", "ns.properties")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,12 +332,11 @@ func waitForValue(dir, ns, name, want string) bool {
 
 func TestSyncerMultiFormatLKGRestart(t *testing.T) {
 	dir := t.TempDir()
-	values := map[string]any{"app": map[string]any{"version": "1.0.0"}}
 	store := newFileStore(dir)
-	if err := store.Publish(Snapshot{Namespace: "config.json", Values: values, ReleaseKey: "r1"}, FormatYAML); err != nil {
+	if err := store.Publish("config.json", FormatYAML, []byte("app:\n  version: 1.0.0\n"), "r1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Publish(Snapshot{Namespace: "config.json", Values: values, ReleaseKey: "r1"}, FormatXML); err != nil {
+	if err := store.Publish("config.json", FormatXML, []byte("<app><version>1.0.0</version></app>"), "r1"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -380,7 +373,7 @@ func TestSyncerMultiFormatLKGRestart(t *testing.T) {
 func TestSyncerMultiFormatChange(t *testing.T) {
 	dir := t.TempDir()
 	remote := newFakeRemote()
-	remote.snaps["config.json"] = Snapshot{Namespace: "config.json", Values: map[string]any{"version": "1"}, ReleaseKey: "r1"}
+	remote.snaps["config.json"] = Snapshot{Namespace: "config.json", RawContent: `{"version": "1"}`, ReleaseKey: "r1"}
 	cfg := Config{
 		AppID:      "app",
 		MetaServer: "http://x",
@@ -396,7 +389,7 @@ func TestSyncerMultiFormatChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	remote.emit(Change{Namespace: "config.json", Values: map[string]any{"version": "2"}, ReleaseKey: "r2", NotificationID: 2})
+	remote.emit(Change{Namespace: "config.json", RawContent: `{"version": "2"}`, ReleaseKey: "r2", NotificationID: 2})
 	if !waitForReleaseKey(s, "r2") {
 		t.Fatal("multi-format change status not applied")
 	}

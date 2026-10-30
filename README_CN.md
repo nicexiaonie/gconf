@@ -930,7 +930,6 @@ func main() {
         Secret:     "your-access-key",
         CacheDir:   "/var/cache/apollo",
         Watch:      true,
-        Format:     apollo.FormatJSON,
         Namespaces: []apollo.NamespaceConfig{
             {Name: "application", Required: true},
             {Name: "datasource"},
@@ -948,7 +947,7 @@ func main() {
     appConf, err := gconf.New(
         gconf.WithConfigPaths("/var/cache/apollo/application"),
         gconf.WithConfigName("application"),
-        gconf.WithConfigType("json"),
+        gconf.WithConfigType("properties"),
         gconf.WithWatchConfig(true),
     )
     if err != nil {
