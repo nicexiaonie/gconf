@@ -3,6 +3,7 @@ package gconf
 import (
 	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,10 @@ type Gconf struct {
 	onChangeHandlers []func(fsnotify.Event)
 	// decoderOptions 解析结构体时传给 viper 的解码选项，由 Options.TagName 决定
 	decoderOptions []viper.DecoderConfigOption
+	// watcher 监听配置文件变化，未启用监听时为 nil；done 在 Close 时关闭，通知监听循环退出
+	watcher   *fsnotify.Watcher
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 // Options 配置选项
@@ -106,45 +111,114 @@ func New(opts ...Option) (*Gconf, error) {
 	}
 
 	// 设置配置监听
-	// viper 的 WatchConfig 会在其内部 goroutine 中直接重载自身，无法加锁，
-	// 因此由一个仅用于监听的影子 viper 感知文件变化，再在写锁内重载主实例
+	// viper 的 WatchConfig 会在其内部 goroutine 中直接重载自身，无法加锁，也无法停止，
+	// 因此自行监听文件变化，再在写锁内重载主实例
 	if options.WatchConfig {
-		watcher := viper.New()
-		for _, path := range options.ConfigPaths {
-			watcher.AddConfigPath(path)
+		if err := g.watchConfig(options); err != nil {
+			return nil, err
 		}
-		watcher.SetConfigName(options.ConfigName)
-		if options.ConfigType != "" {
-			watcher.SetConfigType(options.ConfigType)
-		}
-		watcher.WatchConfig()
-		watcher.OnConfigChange(func(e fsnotify.Event) {
-			if options.Debug {
-				log.Printf("[gconf] 配置文件变化: %s, 操作: %s", e.Name, e.Op)
-			}
-
-			// 回调中通常会读取配置，必须在释放写锁后再执行回调
-			if err := g.ReadInConfig(); err != nil {
-				log.Printf("[gconf] 重新加载配置文件失败: %v", err)
-			}
-
-			// 执行自定义回调
-			if options.OnConfigChange != nil {
-				options.OnConfigChange(e)
-			}
-
-			// 执行注册的所有回调
-			g.mu.RLock()
-			handlers := g.onChangeHandlers
-			g.mu.RUnlock()
-
-			for _, handler := range handlers {
-				go handler(e)
-			}
-		})
 	}
 
 	return g, nil
+}
+
+// watchConfig 监听配置文件所在目录，判定规则与 viper 的 WatchConfig 一致：
+// 配置文件被写入或创建，或配置路径解析出的真实文件变化（如 symlink 切换）时重载；配置文件被删除时停止监听。
+// 启动时未找到配置文件则不监听。
+func (g *Gconf) watchConfig(options *Options) error {
+	filename := g.viper.ConfigFileUsed()
+	if filename == "" {
+		log.Printf("[gconf] 未找到配置文件，不监听配置变化")
+		return nil
+	}
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return fmt.Errorf("gconf: 创建配置文件监听失败: %w", err)
+	}
+	configFile := filepath.Clean(filename)
+	if err := watcher.Add(filepath.Dir(configFile)); err != nil {
+		watcher.Close()
+		return fmt.Errorf("gconf: 监听配置文件目录失败: %w", err)
+	}
+	g.watcher = watcher
+	g.done = make(chan struct{})
+
+	realConfigFile, _ := filepath.EvalSymlinks(filename)
+	go func() {
+		defer watcher.Close()
+		for {
+			select {
+			case <-g.done:
+				return
+			case event, ok := <-watcher.Events:
+				if !ok {
+					return
+				}
+				// Close 之后收到的事件不再处理
+				select {
+				case <-g.done:
+					return
+				default:
+				}
+				currentConfigFile, _ := filepath.EvalSymlinks(filename)
+				const writeOrCreateMask = fsnotify.Write | fsnotify.Create
+				if (filepath.Clean(event.Name) == configFile && event.Op&writeOrCreateMask != 0) ||
+					(currentConfigFile != "" && currentConfigFile != realConfigFile) {
+					realConfigFile = currentConfigFile
+					g.handleConfigChange(event, options)
+				} else if filepath.Clean(event.Name) == configFile && event.Op&fsnotify.Remove != 0 {
+					return
+				}
+			case err, ok := <-watcher.Errors:
+				if ok {
+					log.Printf("[gconf] 配置文件监听出错: %v", err)
+				}
+				return
+			}
+		}
+	}()
+	return nil
+}
+
+// handleConfigChange 重载配置并执行变更回调
+func (g *Gconf) handleConfigChange(e fsnotify.Event, options *Options) {
+	if options.Debug {
+		log.Printf("[gconf] 配置文件变化: %s, 操作: %s", e.Name, e.Op)
+	}
+
+	// 回调中通常会读取配置，必须在释放写锁后再执行回调
+	if err := g.ReadInConfig(); err != nil {
+		log.Printf("[gconf] 重新加载配置文件失败: %v", err)
+	}
+
+	// 执行自定义回调
+	if options.OnConfigChange != nil {
+		options.OnConfigChange(e)
+	}
+
+	// 执行注册的所有回调
+	g.mu.RLock()
+	handlers := g.onChangeHandlers
+	g.mu.RUnlock()
+
+	for _, handler := range handlers {
+		go handler(e)
+	}
+}
+
+// Close 停止配置文件监听，可重复调用，未启用监听时直接返回 nil。
+// Close 返回后不会再开始处理新的文件变化；已开始处理的变化不等待其重载与回调完成。
+// Close 后仍可读取配置，值为最后一次成功加载的内容。
+func (g *Gconf) Close() error {
+	var err error
+	g.closeOnce.Do(func() {
+		if g.watcher == nil {
+			return
+		}
+		close(g.done)
+		err = g.watcher.Close()
+	})
+	return err
 }
 
 // Option 配置选项函数

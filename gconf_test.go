@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -354,6 +355,143 @@ func TestConcurrentReadDuringReload(t *testing.T) {
 
 	if v := conf.GetInt("app.version"); v != last {
 		t.Errorf("热更新未生效：期望 %d，得到 %d", last, v)
+	}
+}
+
+// waitFor 在 timeout 内轮询 cond，满足时返回 true
+func waitFor(timeout time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for !cond() {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return true
+}
+
+// writeVersionConfig 在临时目录写入 config.yaml，返回目录与文件路径
+func writeVersionConfig(t *testing.T, version int) (string, string) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "gconf-watch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(file, []byte(fmt.Sprintf("app:\n  version: %d\n", version)), 0644); err != nil {
+		os.RemoveAll(dir)
+		t.Fatal(err)
+	}
+	return dir, file
+}
+
+// TestCloseStopsReload 验证 Close 后不再重载配置、不再触发回调，且仍可读取最后一次加载的配置
+func TestCloseStopsReload(t *testing.T) {
+	dir, file := writeVersionConfig(t, 1)
+	defer os.RemoveAll(dir)
+
+	var called int32
+	conf, err := New(
+		WithConfigPaths(dir),
+		WithWatchConfig(true),
+		WithOnConfigChange(func(fsnotify.Event) { atomic.AddInt32(&called, 1) }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Close 前热更新正常生效
+	if err := os.WriteFile(file, []byte("app:\n  version: 2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !waitFor(2*time.Second, func() bool { return conf.GetInt("app.version") == 2 }) {
+		t.Fatal("Close 前热更新未生效")
+	}
+
+	if err := conf.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before := atomic.LoadInt32(&called)
+	if err := os.WriteFile(file, []byte("app:\n  version: 3\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	if v := conf.GetInt("app.version"); v != 2 {
+		t.Errorf("Close 后不应重载：期望 2，得到 %d", v)
+	}
+	if after := atomic.LoadInt32(&called); after != before {
+		t.Errorf("Close 后不应触发回调：调用次数由 %d 变为 %d", before, after)
+	}
+}
+
+// TestCloseIdempotent 验证 Close 可重复调用，未启用监听的实例与子配置调用 Close 返回 nil
+func TestCloseIdempotent(t *testing.T) {
+	dir, _ := writeVersionConfig(t, 1)
+	defer os.RemoveAll(dir)
+
+	conf, err := New(WithConfigPaths(dir), WithWatchConfig(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := conf.Close(); err != nil {
+			t.Errorf("第 %d 次 Close 返回错误: %v", i+1, err)
+		}
+	}
+
+	plain, err := New(WithConfigPaths(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := plain.Close(); err != nil {
+		t.Errorf("未启用监听的实例 Close 返回错误: %v", err)
+	}
+	if err := plain.Sub("app").Close(); err != nil {
+		t.Errorf("子配置 Close 返回错误: %v", err)
+	}
+}
+
+// TestReloadOnSymlinkSwitch 验证以临时 symlink + rename 切换配置文件指向时触发重载（Apollo 同步的发布方式）
+func TestReloadOnSymlinkSwitch(t *testing.T) {
+	dir, err := os.MkdirTemp("", "gconf-symlink")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	snapDir := filepath.Join(dir, "snapshots")
+	if err := os.Mkdir(snapDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	stable := filepath.Join(dir, "config.yaml")
+	publish := func(version int) {
+		name := fmt.Sprintf("config-%d.yaml", version)
+		content := fmt.Sprintf("app:\n  version: %d\n", version)
+		if err := os.WriteFile(filepath.Join(snapDir, name), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		tmp := stable + ".tmp"
+		if err := os.Symlink(filepath.Join("snapshots", name), tmp); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(tmp, stable); err != nil {
+			t.Fatal(err)
+		}
+	}
+	publish(1)
+
+	conf, err := New(WithConfigPaths(dir), WithWatchConfig(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conf.Close()
+	if v := conf.GetInt("app.version"); v != 1 {
+		t.Fatalf("初始加载：期望 1，得到 %d", v)
+	}
+
+	publish(2)
+	if !waitFor(2*time.Second, func() bool { return conf.GetInt("app.version") == 2 }) {
+		t.Errorf("symlink 切换后未重载：得到 %d", conf.GetInt("app.version"))
 	}
 }
 

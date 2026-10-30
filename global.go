@@ -2,6 +2,7 @@ package gconf
 
 import (
 	"fmt"
+	"log"
 	"sync"
 
 	"github.com/fsnotify/fsnotify"
@@ -14,7 +15,8 @@ var (
 )
 
 // Init 初始化全局配置实例（建议在应用启动时调用）
-// 可多次调用，每次调用都会用新的选项重新初始化，确保传入的配置生效
+// 可多次调用，每次调用都会用新的选项重新初始化，确保传入的配置生效；
+// 初始化成功后关闭被替换的旧实例，旧实例不再热更新，初始化失败时旧实例保持不变
 func Init(opts ...Option) error {
 	defaultInstanceMu.Lock()
 	defer defaultInstanceMu.Unlock()
@@ -22,6 +24,11 @@ func Init(opts ...Option) error {
 	instance, err := New(opts...)
 	if err != nil {
 		return err
+	}
+	if defaultInstance != nil {
+		if err := defaultInstance.Close(); err != nil {
+			log.Printf("[gconf] 关闭旧的全局实例失败: %v", err)
+		}
 	}
 	defaultInstance = instance
 	return nil

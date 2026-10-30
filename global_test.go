@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestInit(t *testing.T) {
@@ -76,6 +77,42 @@ func TestGetInstancePanicsOnInvalidConfig(t *testing.T) {
 		}
 	}()
 	GetInstance()
+}
+
+// TestReInitClosesOldInstance 验证再次 Init 成功后旧实例不再热更新
+func TestReInitClosesOldInstance(t *testing.T) {
+	dir, file := writeVersionConfig(t, 1)
+	defer os.RemoveAll(dir)
+	defer func() {
+		if defaultInstance != nil {
+			defaultInstance.Close()
+		}
+		defaultInstance = nil
+	}()
+
+	opts := []Option{WithConfigPaths(dir), WithWatchConfig(true)}
+	if err := Init(opts...); err != nil {
+		t.Fatal(err)
+	}
+	old := GetInstance()
+	if err := Init(opts...); err != nil {
+		t.Fatal(err)
+	}
+	if GetInstance() == old {
+		t.Fatal("再次 Init 应替换全局实例")
+	}
+
+	if err := os.WriteFile(file, []byte("app:\n  version: 2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !waitFor(2*time.Second, func() bool { return GetInt("app.version") == 2 }) {
+		t.Fatal("新实例热更新未生效")
+	}
+	// 留出旧实例若仍在监听时完成重载的时间
+	time.Sleep(200 * time.Millisecond)
+	if v := old.GetInt("app.version"); v != 1 {
+		t.Errorf("旧实例应已关闭不再重载：期望 1，得到 %d", v)
+	}
 }
 
 func TestGlobalFunctions(t *testing.T) {

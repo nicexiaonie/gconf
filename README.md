@@ -173,7 +173,7 @@ if err := gconf.Init(gconf.WithConfigName("app")); err != nil {
 port := gconf.GetInt("server.port")
 ```
 
-- `Init` 可重复调用，每次都用新选项创建新实例并替换全局实例；旧实例已启动的文件监听不会停止
+- `Init` 可重复调用，每次都用新选项创建新实例并替换全局实例；替换成功后旧实例被 `Close()`，不再热更新，创建失败时旧实例保持不变
 - `InitWithConfig` 与 `Init` 行为一致，为兼容旧版本保留
 - `GetInstance()` 返回全局实例；未调用 `Init` 时使用默认选项自动创建，**创建失败（如配置文件解析失败）时 `GetInstance` 及所有包级函数会直接 panic，panic 信息包含原始错误**。生产代码应在启动时调用 `Init` 并检查错误
 - 包级函数只覆盖常用方法，其余方法通过 `gconf.GetInstance()` 调用，见 [API 速查](#api-速查)
@@ -348,6 +348,14 @@ conf.OnConfigChange(func(e fsnotify.Event) {
 - 回调执行时重载已完成且锁已释放，可在回调中安全读取配置
 - 重载失败（如文件内容解析错误）会输出日志，回调仍会执行
 
+### 停止监听
+
+`Close()` 停止配置文件监听并释放监听资源，可重复调用；未启用监听的实例与 `Sub()` 返回的子配置调用时直接返回 nil。
+
+- `Close()` 返回后不会再开始处理新的文件变化；已开始处理的变化不等待其重载与回调完成，因此可在回调中调用 `Close()`
+- `Close()` 后仍可读取配置，值为最后一次成功加载的内容
+- 全局实例通过 `gconf.GetInstance().Close()` 关闭
+
 ### 并发语义
 
 - 所有读取方法加读锁，`Set`、`SetDefault`、重载等修改操作加写锁
@@ -424,7 +432,7 @@ conf.Debug()
 | 解析 | `Unmarshal`、`UnmarshalKey`、`UnmarshalExact` |
 | 修改 | `Set`、`SetDefault`、`RegisterAlias`、`BindEnv` |
 | 文件 | `ReadInConfig`、`MergeInConfig`、`WriteConfig`、`SafeWriteConfig`、`WriteConfigAs`、`SafeWriteConfigAs` |
-| 其他 | `OnConfigChange`、`Sub`、`GetViper`、`Debug` |
+| 其他 | `OnConfigChange`、`Close`、`Sub`、`GetViper`、`Debug` |
 
 ### 包级函数（操作全局实例）
 
