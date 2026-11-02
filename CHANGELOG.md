@@ -2,7 +2,9 @@
 
 本文档记录了 Gconf 的所有重要变更。
 
-## [Unreleased]
+## [1.2.0] - 2026-11-02
+
+主包 `v1.2.0`，Apollo 子包 `apollo/v1.2.0`。
 
 ### 新增 ✨
 
@@ -36,6 +38,25 @@
 - `Sub()` 返回的子配置沿用父实例的环境变量设置（`AutomaticEnv`、前缀与替换规则），此前子配置不读取环境变量
 - `WithOnConfigChange`、`OnConfigChange`（实例方法与包级函数）的回调参数由 `fsnotify.Event` 改为 `gconf.ChangeEvent`，需将回调改为 `func(e gconf.ChangeEvent)`，原 `e.Name` 改用 `e.File`，并按 `e.Err` 区分成功与失败；公开 API 不再引用 fsnotify 类型
 - 回调改为在监听 goroutine 中同步执行，耗时回调会推迟下一次重载，需自行启动 goroutine 处理耗时操作
+
+### 新增 ✨（apollo 模块）
+
+- **`Retry` 对首次拉取生效**：`Start()` 按 `Interval` 重新检查尚未加载成功的 Namespace，最多尝试 `MaxAttempts` 次后再按 `Required` 与 LKG 处理；此前该字段无任何效果
+- **`Start(ctx)` 的 ctx 可取消启动**：连接 Apollo 与重试等待均可通过 ctx 取消或超时，返回 ctx 的错误且不以 LKG 降级启动
+
+### 变更 🔧（apollo 模块）
+
+- **只保留当前版本**：发布后删除不再被稳定路径 symlink 引用的版本文件，不再累积历史版本
+- 以 LKG 降级启动时，远端错误记录到 `Status().LastError`
+
+### 修复 🐛（apollo 模块）
+
+- **修复 Apollo 不可用时 properties 型 Namespace 以空配置覆盖 LKG**：未加载成功的 Namespace 视为不可用
+- **修复 `Close()` 后 agollo 回调导致 `send on closed channel` panic**
+- **突发变更不再丢失最新版本**：变更队列改为每个 Namespace 只保留最新一条待处理变更；此前队列容量为 64，队列满时新变更被丢弃
+- **`Watch: true` 时先注册变更监听再首次拉取**：首次同步期间到达的发布暂存，同步完成后处理；此前该窗口内的发布会丢失
+- **LKG 以版本文件名中的 hash 校验**：索引丢失或落后于 symlink（如切换 symlink 后、更新索引前进程崩溃）时 LKG 仍可用，`ReleaseKey` 为空
+- **修复 Windows 下发布失败**：版本文件与索引改为在同一可写句柄上写入并刷盘，并检查关闭文件的错误；此前以只读句柄刷盘，Windows 拒绝该操作
 
 ## [1.1.0] - 2026-10-30
 
