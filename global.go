@@ -46,7 +46,8 @@ func InitWithConfig(opts ...Option) error {
 }
 
 // GetInstance 获取全局配置实例
-// 如果未调用 Init 进行初始化，将使用默认配置自动初始化；自动初始化失败（如配置文件解析失败）时 panic
+// 如果未调用 Init 进行初始化，将使用默认配置自动初始化并输出一条警告日志，注明使用的配置文件；
+// 自动初始化失败（如配置文件解析失败）时 panic
 func GetInstance() *Gconf {
 	defaultInstanceMu.RLock()
 	if defaultInstance != nil {
@@ -62,6 +63,12 @@ func GetInstance() *Gconf {
 		instance, err := New()
 		if err != nil {
 			panic(fmt.Sprintf("gconf: 未调用 Init，使用默认选项自动初始化失败: %v（应在启动时调用 Init 并检查错误）", err))
+		}
+		// 默认选项按当前工作目录查找配置文件，结果随启动目录变化，需提示实际使用的文件
+		if file := instance.ConfigFileUsed(); file != "" {
+			log.Printf("[gconf] 警告: 未调用 Init，已使用默认选项自动初始化，配置文件: %s（应在启动时调用 Init）", file)
+		} else {
+			log.Printf("[gconf] 警告: 未调用 Init，已使用默认选项自动初始化，未找到配置文件，配置为空（应在启动时调用 Init）")
 		}
 		defaultInstance = instance
 	}

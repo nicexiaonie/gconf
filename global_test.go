@@ -2,6 +2,7 @@ package gconf
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,6 +42,65 @@ func TestGetInstance(t *testing.T) {
 	instance2 := GetInstance()
 	if instance != instance2 {
 		t.Error("GetInstance 应该返回相同的单例")
+	}
+}
+
+// TestGetInstanceWarnsOnAutoInit 验证未调用 Init 时自动初始化只输出一次警告，并注明使用的配置文件或未找到配置文件；调用 Init 不输出该警告
+func TestGetInstanceWarnsOnAutoInit(t *testing.T) {
+	var buf strings.Builder
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	defer func() {
+		if defaultInstance != nil {
+			defaultInstance.Close()
+		}
+		defaultInstance = nil
+	}()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(wd)
+	const warning = "未调用 Init，已使用默认选项自动初始化"
+
+	empty, err := os.MkdirTemp("", "gconf-global")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(empty)
+	if err := os.Chdir(empty); err != nil {
+		t.Fatal(err)
+	}
+	defaultInstance = nil
+	GetInstance()
+	GetInstance()
+	if got := strings.Count(buf.String(), warning); got != 1 {
+		t.Errorf("自动初始化警告应只输出一次，实际 %d 次: %s", got, buf.String())
+	}
+	if !strings.Contains(buf.String(), "未找到配置文件") {
+		t.Errorf("未找到配置文件时警告应注明，得到: %s", buf.String())
+	}
+
+	dir, file := writeVersionConfig(t, 1)
+	defer os.RemoveAll(dir)
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	buf.Reset()
+	defaultInstance = nil
+	GetInstance()
+	if !strings.Contains(buf.String(), warning) || !strings.Contains(buf.String(), filepath.Base(file)) {
+		t.Errorf("找到配置文件时警告应注明文件路径，得到: %s", buf.String())
+	}
+
+	buf.Reset()
+	defaultInstance = nil
+	if err := Init(); err != nil {
+		t.Fatal(err)
+	}
+	GetInstance()
+	if strings.Contains(buf.String(), warning) {
+		t.Errorf("调用 Init 后不应输出自动初始化警告，得到: %s", buf.String())
 	}
 }
 

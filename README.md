@@ -177,7 +177,7 @@ port := gconf.GetInt("server.port")
 - 替换时，旧实例上通过 `OnConfigChange` 注册的回调按原顺序迁移到新实例；`WithOnConfigChange` 传入的回调不迁移，以本次 `Init` 传入的选项为准。`Init` 本身不触发回调，重复 `Init` 后如需按新配置更新业务状态，应自行重新读取
 - 不要长期持有 `GetInstance()` 的返回值：重复 `Init` 后它指向已关闭的旧实例，值不再更新；应使用包级函数或每次重新调用 `GetInstance()`
 - `InitWithConfig` 与 `Init` 行为一致，为兼容旧版本保留
-- `GetInstance()` 返回全局实例；未调用 `Init` 时使用默认选项自动创建，**创建失败（如配置文件解析失败）时 `GetInstance` 及所有包级函数会直接 panic，panic 信息包含原始错误**。生产代码应在启动时调用 `Init` 并检查错误
+- `GetInstance()` 返回全局实例；未调用 `Init` 时使用默认选项自动创建，并输出一条警告日志，注明使用的配置文件或未找到配置文件（默认选项在当前工作目录的 `.`、`./config` 下查找，结果随启动目录变化）；**创建失败（如配置文件解析失败）时 `GetInstance` 及所有包级函数会直接 panic，panic 信息包含原始错误**。生产代码应在启动时调用 `Init` 并检查错误
 - 包级函数只覆盖常用方法，其余方法通过 `gconf.GetInstance()` 调用，见 [API 速查](#api-速查)
 
 ## 读取配置
