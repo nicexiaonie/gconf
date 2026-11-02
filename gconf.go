@@ -25,6 +25,9 @@ type Gconf struct {
 	viperMu          sync.RWMutex
 	mu               sync.RWMutex
 	onChangeHandlers []func(ChangeEvent)
+	// callbackMu 执行一轮回调时持有；Init 替换实例时新实例沿用旧实例的锁，
+	// 使旧实例正在执行的回调结束前，新实例不会开始执行回调
+	callbackMu *sync.Mutex
 	// decoderOptions 解析结构体时传给 viper 的解码选项，由 Options.TagName 决定
 	decoderOptions []viper.DecoderConfigOption
 	// watcher 监听配置文件变化，未启用监听时为 nil；done 在 Close 时关闭，通知监听循环退出
@@ -68,6 +71,12 @@ type Options struct {
 
 // New 创建一个新的配置管理器实例
 func New(opts ...Option) (*Gconf, error) {
+	return newGconf(nil, opts...)
+}
+
+// newGconf 创建配置管理器实例。inherit 非 nil 时（Init 替换全局实例），
+// 在开始监听前继承其通过 OnConfigChange 注册的回调与回调锁，避免监听启动后、继承完成前的变化漏掉这些回调
+func newGconf(inherit *Gconf, opts ...Option) (*Gconf, error) {
 	options := &Options{
 		ConfigPaths: []string{".", "./config"},
 		ConfigName:  "config",
@@ -84,6 +93,13 @@ func New(opts ...Option) (*Gconf, error) {
 		viper:            newViper(),
 		onChangeHandlers: make([]func(ChangeEvent), 0),
 		decoderOptions:   decoderOptions(options.TagName),
+		callbackMu:       &sync.Mutex{},
+	}
+	if inherit != nil {
+		inherit.mu.RLock()
+		g.onChangeHandlers = append(g.onChangeHandlers, inherit.onChangeHandlers...)
+		inherit.mu.RUnlock()
+		g.callbackMu = inherit.callbackMu
 	}
 
 	// 设置配置文件路径
@@ -155,6 +171,7 @@ func newViper() *viper.Viper {
 // 配置文件被删除或监听出错时通知回调并继续监听，监听只在 Close 或 watcher 关闭时停止：
 // 删除后文件重新出现即恢复重载；rename 覆盖保存时 kqueue 先报告删除，此时新文件已就位，等待随后的创建事件重载。
 // 启动时未找到配置文件则不监听。
+// 注册监听后再读取一次配置文件：注册前的变化已包含在这次读取中，注册后的变化一定产生事件，读取与监听之间不会漏掉变化。
 func (g *Gconf) watchConfig(options *Options) error {
 	filename := g.viper.ConfigFileUsed()
 	if filename == "" {
@@ -170,10 +187,15 @@ func (g *Gconf) watchConfig(options *Options) error {
 		watcher.Close()
 		return fmt.Errorf("gconf: 监听配置文件目录失败: %w", err)
 	}
+	// 先解析 symlink 再读取：读取前发生的 symlink 切换已体现在读取结果中，读取后的切换会被识别为变化
+	realConfigFile, _ := filepath.EvalSymlinks(filename)
+	if err := g.ReadInConfig(); err != nil {
+		watcher.Close()
+		return err
+	}
 	g.watcher = watcher
 	g.done = make(chan struct{})
 
-	realConfigFile, _ := filepath.EvalSymlinks(filename)
 	go func() {
 		defer watcher.Close()
 		for {
@@ -241,25 +263,33 @@ func (g *Gconf) reload(options *Options) {
 }
 
 // notify 执行变更回调。
-// 回调在监听 goroutine 中按顺序同步执行，保证回调顺序与重载顺序一致
+// 回调在监听 goroutine 中按顺序同步执行，保证回调顺序与重载顺序一致；
+// 持有回调锁执行，Close 后不再开始执行剩余的回调
 func (g *Gconf) notify(event ChangeEvent, options *Options) {
-	// 执行自定义回调
-	if options.OnConfigChange != nil {
-		options.OnConfigChange(event)
-	}
+	g.callbackMu.Lock()
+	defer g.callbackMu.Unlock()
 
-	// 执行注册的所有回调
+	// 先执行自定义回调，再执行注册的所有回调
 	g.mu.RLock()
-	handlers := g.onChangeHandlers
+	handlers := make([]func(ChangeEvent), 0, len(g.onChangeHandlers)+1)
+	if options.OnConfigChange != nil {
+		handlers = append(handlers, options.OnConfigChange)
+	}
+	handlers = append(handlers, g.onChangeHandlers...)
 	g.mu.RUnlock()
 
 	for _, handler := range handlers {
+		select {
+		case <-g.done:
+			return
+		default:
+		}
 		handler(event)
 	}
 }
 
 // Close 停止配置文件监听，可重复调用，未启用监听时直接返回 nil。
-// Close 返回后不会再开始处理新的文件变化；已开始处理的变化不等待其重载与回调完成。
+// Close 返回后不会再开始处理新的文件变化，也不会再开始执行剩余的回调；不等待正在执行的重载与回调完成。
 // Close 后仍可读取配置，值为最后一次成功加载的内容。
 func (g *Gconf) Close() error {
 	var err error

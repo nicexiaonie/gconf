@@ -706,6 +706,46 @@ func TestCloseIdempotent(t *testing.T) {
 	}
 }
 
+// TestCloseSkipsRemainingHandlers 验证 Close 时一轮回调正在执行，Close 后不再开始执行剩余的回调
+func TestCloseSkipsRemainingHandlers(t *testing.T) {
+	dir, file := writeVersionConfig(t, 1)
+	defer os.RemoveAll(dir)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	conf, err := New(
+		WithConfigPaths(dir),
+		WithWatchConfig(true),
+		WithOnConfigChange(func(ChangeEvent) {
+			once.Do(func() {
+				close(started)
+				<-release
+			})
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var remaining int32
+	conf.OnConfigChange(func(ChangeEvent) { atomic.AddInt32(&remaining, 1) })
+
+	appendFile(t, file, "  name: demo\n")
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("回调未触发")
+	}
+	if err := conf.Close(); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	time.Sleep(200 * time.Millisecond)
+	if n := atomic.LoadInt32(&remaining); n != 0 {
+		t.Errorf("Close 后不应再开始执行剩余的回调，实际执行 %d 次", n)
+	}
+}
+
 // TestReloadOnSymlinkSwitch 验证以临时 symlink + rename 切换配置文件指向时触发重载（Apollo 同步的发布方式）
 func TestReloadOnSymlinkSwitch(t *testing.T) {
 	dir, err := os.MkdirTemp("", "gconf-symlink")

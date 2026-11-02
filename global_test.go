@@ -213,6 +213,181 @@ func TestReInitKeepsHandlers(t *testing.T) {
 	}
 }
 
+// TestReInitSerializesCallbacks 验证再次 Init 时，旧实例正在执行的回调结束前新实例不会开始执行回调，同一回调不会被新旧实例同时执行
+func TestReInitSerializesCallbacks(t *testing.T) {
+	dir, file := writeVersionConfig(t, 1)
+	defer os.RemoveAll(dir)
+	defer func() {
+		if defaultInstance != nil {
+			defaultInstance.Close()
+		}
+		defaultInstance = nil
+	}()
+
+	opts := []Option{WithConfigPaths(dir), WithWatchConfig(true)}
+	if err := Init(opts...); err != nil {
+		t.Fatal(err)
+	}
+	var entered, running, overlapped int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	OnConfigChange(func(ChangeEvent) {
+		if atomic.AddInt32(&running, 1) > 1 {
+			atomic.StoreInt32(&overlapped, 1)
+		}
+		defer atomic.AddInt32(&running, -1)
+		if atomic.AddInt32(&entered, 1) == 1 {
+			close(started)
+			<-release
+		}
+	})
+
+	appendFile(t, file, "  name: demo\n")
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("旧实例回调未触发")
+	}
+	if err := Init(opts...); err != nil {
+		t.Fatal(err)
+	}
+	appendFile(t, file, "  env: test\n")
+	// 回调被阻塞不影响新实例重载
+	if !waitFor(2*time.Second, func() bool { return GetString("app.env") == "test" }) {
+		t.Fatal("新实例热更新未生效")
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := atomic.LoadInt32(&entered); n != 1 {
+		t.Errorf("旧实例回调结束前新实例不应执行回调，实际进入 %d 次", n)
+	}
+
+	close(release)
+	if !waitFor(2*time.Second, func() bool { return atomic.LoadInt32(&entered) >= 2 }) {
+		t.Fatal("旧实例回调结束后新实例应执行回调")
+	}
+	if atomic.LoadInt32(&overlapped) != 0 {
+		t.Error("同一回调被新旧实例同时执行")
+	}
+}
+
+// TestInitInCallback 验证在回调中再次调用 Init 不会死锁，回调继承到新实例后继续生效
+func TestInitInCallback(t *testing.T) {
+	dir, file := writeVersionConfig(t, 1)
+	defer os.RemoveAll(dir)
+	defer func() {
+		if defaultInstance != nil {
+			defaultInstance.Close()
+		}
+		defaultInstance = nil
+	}()
+
+	opts := []Option{WithConfigPaths(dir), WithWatchConfig(true)}
+	if err := Init(opts...); err != nil {
+		t.Fatal(err)
+	}
+	old := GetInstance()
+	var calls int32
+	OnConfigChange(func(ChangeEvent) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			if err := Init(opts...); err != nil {
+				t.Errorf("回调中 Init 失败: %v", err)
+			}
+		}
+	})
+
+	appendFile(t, file, "  name: demo\n")
+	if !waitFor(2*time.Second, func() bool { return atomic.LoadInt32(&calls) >= 1 }) {
+		t.Fatal("回调未触发")
+	}
+	if !waitFor(2*time.Second, func() bool { return GetInstance() != old }) {
+		t.Fatal("回调中调用 Init 未完成，可能死锁")
+	}
+	appendFile(t, file, "  env: test\n")
+	if !waitFor(2*time.Second, func() bool { return atomic.LoadInt32(&calls) >= 2 }) {
+		t.Fatal("回调中 Init 后回调未在新实例上继续生效")
+	}
+}
+
+// TestReInitConcurrentWrites 反复 Init 的同时持续以 rename 覆盖方式修改配置文件，
+// 验证回调不会重叠执行，且最终读到最后写入的值。时序窗口无法稳定复现，属概率性验证
+func TestReInitConcurrentWrites(t *testing.T) {
+	dir, file := writeVersionConfig(t, 0)
+	defer os.RemoveAll(dir)
+	defer func() {
+		if defaultInstance != nil {
+			defaultInstance.Close()
+		}
+		defaultInstance = nil
+	}()
+
+	// 临时文件放在监听目录之外：macOS 上 fsnotify 注册目录监听时会逐个监听目录内文件，
+	// 目录内文件恰好被 rename 移走会导致注册失败，与本测试验证的 Init 行为无关
+	tmpDir, err := os.MkdirTemp(filepath.Dir(dir), "gconf-tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+	write := func(version int) error {
+		tmp := filepath.Join(tmpDir, "config.yaml")
+		if err := os.WriteFile(tmp, fmt.Appendf(nil, "app:\n  version: %d\n", version), 0644); err != nil {
+			return err
+		}
+		return os.Rename(tmp, file)
+	}
+	opts := []Option{WithConfigPaths(dir), WithWatchConfig(true)}
+	if err := Init(opts...); err != nil {
+		t.Fatal(err)
+	}
+	var running, overlapped int32
+	OnConfigChange(func(ChangeEvent) {
+		if atomic.AddInt32(&running, 1) > 1 {
+			atomic.StoreInt32(&overlapped, 1)
+		}
+		time.Sleep(time.Millisecond)
+		atomic.AddInt32(&running, -1)
+	})
+
+	stop := make(chan struct{})
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		for v := 1; ; v++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if err := write(v); err != nil {
+				t.Errorf("写入配置失败: %v", err)
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	var initErr error
+	for i := 0; i < 20 && initErr == nil; i++ {
+		if err := Init(opts...); err != nil {
+			initErr = fmt.Errorf("第 %d 次 Init 失败: %w", i+1, err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(stop)
+	<-writerDone
+	if initErr != nil {
+		t.Fatal(initErr)
+	}
+
+	if err := write(-1); err != nil {
+		t.Fatal(err)
+	}
+	if !waitFor(2*time.Second, func() bool { return GetInt("app.version") == -1 }) {
+		t.Fatalf("未读到最后写入的值，得到 %d", GetInt("app.version"))
+	}
+	if atomic.LoadInt32(&overlapped) != 0 {
+		t.Error("回调重叠执行")
+	}
+}
+
 func TestGlobalFunctions(t *testing.T) {
 	// 重置全局实例
 	defaultInstance = nil

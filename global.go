@@ -14,24 +14,18 @@ var (
 
 // Init 初始化全局配置实例（建议在应用启动时调用）
 // 可多次调用，每次调用都会用新的选项重新初始化，确保传入的配置生效；
-// 初始化成功后将旧实例上通过 OnConfigChange 注册的回调迁移到新实例，并关闭旧实例，旧实例不再热更新；
+// 新实例在开始监听前继承旧实例上通过 OnConfigChange 注册的回调，初始化成功后关闭旧实例，旧实例不再热更新；
+// 旧实例正在执行的回调结束前新实例不会开始执行回调，同一回调不会被新旧实例同时执行；
 // WithOnConfigChange 传入的回调不迁移，以本次传入的选项为准。初始化失败时旧实例保持不变
 func Init(opts ...Option) error {
 	defaultInstanceMu.Lock()
 	defer defaultInstanceMu.Unlock()
 
-	instance, err := New(opts...)
+	instance, err := newGconf(defaultInstance, opts...)
 	if err != nil {
 		return err
 	}
 	if defaultInstance != nil {
-		defaultInstance.mu.RLock()
-		handlers := append([]func(ChangeEvent){}, defaultInstance.onChangeHandlers...)
-		defaultInstance.mu.RUnlock()
-		instance.mu.Lock()
-		instance.onChangeHandlers = append(handlers, instance.onChangeHandlers...)
-		instance.mu.Unlock()
-
 		if err := defaultInstance.Close(); err != nil {
 			log.Printf("[gconf] 关闭旧的全局实例失败: %v", err)
 		}
