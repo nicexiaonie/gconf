@@ -1,8 +1,10 @@
 package gconf
 
 import (
+	"errors"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -149,8 +151,9 @@ func newViper() *viper.Viper {
 	return viper.NewWithOptions(viper.WithCodecRegistry(registry))
 }
 
-// watchConfig 监听配置文件所在目录，判定规则与 viper 的 WatchConfig 一致：
-// 配置文件被写入或创建，或配置路径解析出的真实文件变化（如 symlink 切换）时重载；配置文件被删除时停止监听。
+// watchConfig 监听配置文件所在目录：配置文件被写入或创建，或配置路径解析出的真实文件变化（如 symlink 切换）时重载。
+// 配置文件被删除或监听出错时通知回调并继续监听，监听只在 Close 或 watcher 关闭时停止：
+// 删除后文件重新出现即恢复重载；rename 覆盖保存时 kqueue 先报告删除，此时新文件已就位，等待随后的创建事件重载。
 // 启动时未找到配置文件则不监听。
 func (g *Gconf) watchConfig(options *Options) error {
 	filename := g.viper.ConfigFileUsed()
@@ -192,35 +195,54 @@ func (g *Gconf) watchConfig(options *Options) error {
 				if (filepath.Clean(event.Name) == configFile && event.Op&writeOrCreateMask != 0) ||
 					(currentConfigFile != "" && currentConfigFile != realConfigFile) {
 					realConfigFile = currentConfigFile
-					g.handleConfigChange(event, options)
+					if options.Debug {
+						log.Printf("[gconf] 配置文件变化: %s, 操作: %s", event.Name, event.Op)
+					}
+					g.reload(options)
 				} else if filepath.Clean(event.Name) == configFile && event.Op&fsnotify.Remove != 0 {
-					return
+					if _, err := os.Stat(filename); err != nil {
+						log.Printf("[gconf] 配置文件已删除，保留当前配置，文件恢复后继续重载: %v", err)
+						g.notify(ChangeEvent{File: g.ConfigFileUsed(), Err: fmt.Errorf("gconf: 配置文件已删除: %w", err)}, options)
+					}
 				}
 			case err, ok := <-watcher.Errors:
-				if ok {
-					log.Printf("[gconf] 配置文件监听出错: %v", err)
+				if !ok {
+					return
 				}
-				return
+				select {
+				case <-g.done:
+					return
+				default:
+				}
+				g.handleWatchError(err, options)
 			}
 		}
 	}()
 	return nil
 }
 
-// handleConfigChange 重载配置并执行变更回调。
-// 回调在监听 goroutine 中按顺序同步执行，保证回调顺序与重载顺序一致
-func (g *Gconf) handleConfigChange(e fsnotify.Event, options *Options) {
-	if options.Debug {
-		log.Printf("[gconf] 配置文件变化: %s, 操作: %s", e.Name, e.Op)
+// handleWatchError 处理监听错误：通知回调后继续监听；事件队列溢出时可能丢失变化，主动重载一次
+func (g *Gconf) handleWatchError(err error, options *Options) {
+	log.Printf("[gconf] 配置文件监听出错: %v", err)
+	g.notify(ChangeEvent{File: g.ConfigFileUsed(), Err: fmt.Errorf("gconf: 配置文件监听出错: %w", err)}, options)
+	if errors.Is(err, fsnotify.ErrEventOverflow) {
+		g.reload(options)
 	}
+}
 
+// reload 重载配置并以重载结果通知回调
+func (g *Gconf) reload(options *Options) {
 	// 回调中通常会读取配置，必须在释放写锁后再执行回调
 	err := g.ReadInConfig()
 	if err != nil {
 		log.Printf("[gconf] 重新加载配置文件失败: %v", err)
 	}
-	event := ChangeEvent{File: g.ConfigFileUsed(), Err: err}
+	g.notify(ChangeEvent{File: g.ConfigFileUsed(), Err: err}, options)
+}
 
+// notify 执行变更回调。
+// 回调在监听 goroutine 中按顺序同步执行，保证回调顺序与重载顺序一致
+func (g *Gconf) notify(event ChangeEvent, options *Options) {
 	// 执行自定义回调
 	if options.OnConfigChange != nil {
 		options.OnConfigChange(event)

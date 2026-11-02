@@ -1,6 +1,7 @@
 package gconf
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 func TestNew(t *testing.T) {
@@ -545,6 +548,134 @@ func TestCallbacksRunInOrder(t *testing.T) {
 	defer mu.Unlock()
 	if got := fmt.Sprint(order[:3]); got != "[option first second]" {
 		t.Errorf("回调执行顺序期望 [option first second]，得到 %s", got)
+	}
+}
+
+// eventRecorder 并发安全地记录回调收到的事件
+type eventRecorder struct {
+	mu     sync.Mutex
+	events []ChangeEvent
+}
+
+func (r *eventRecorder) record(e ChangeEvent) {
+	r.mu.Lock()
+	r.events = append(r.events, e)
+	r.mu.Unlock()
+}
+
+func (r *eventRecorder) snapshot() []ChangeEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]ChangeEvent(nil), r.events...)
+}
+
+// TestReloadAfterRenameReplace 验证以临时文件 rename 覆盖配置文件后重载，之后的修改仍能重载，且不产生错误事件
+func TestReloadAfterRenameReplace(t *testing.T) {
+	dir, file := writeVersionConfig(t, 1)
+	defer os.RemoveAll(dir)
+
+	conf, err := New(WithConfigPaths(dir), WithWatchConfig(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conf.Close()
+	var recorder eventRecorder
+	conf.OnConfigChange(recorder.record)
+
+	tmp := file + ".tmp"
+	if err := os.WriteFile(tmp, []byte("app:\n  version: 2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, file); err != nil {
+		t.Fatal(err)
+	}
+	if !waitFor(2*time.Second, func() bool { return conf.GetInt("app.version") == 2 }) {
+		t.Fatal("rename 覆盖后未重载")
+	}
+
+	if err := os.WriteFile(file, []byte("app:\n  version: 3\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !waitFor(2*time.Second, func() bool { return conf.GetInt("app.version") == 3 }) {
+		t.Fatal("rename 覆盖后再次修改未重载，监听已停止")
+	}
+	for _, e := range recorder.snapshot() {
+		if e.Err != nil {
+			t.Errorf("rename 覆盖不应产生错误事件: %v", e.Err)
+		}
+	}
+}
+
+// TestDeleteNotifiesAndRecovers 验证配置文件被删除时回调收到错误且保留旧配置，文件重新创建后恢复重载
+func TestDeleteNotifiesAndRecovers(t *testing.T) {
+	dir, file := writeVersionConfig(t, 1)
+	defer os.RemoveAll(dir)
+
+	conf, err := New(WithConfigPaths(dir), WithWatchConfig(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conf.Close()
+	var recorder eventRecorder
+	conf.OnConfigChange(recorder.record)
+
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	if !waitFor(2*time.Second, func() bool {
+		for _, e := range recorder.snapshot() {
+			if errors.Is(e.Err, os.ErrNotExist) {
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatal("删除配置文件后回调未收到错误事件")
+	}
+	if v := conf.GetInt("app.version"); v != 1 {
+		t.Errorf("删除后应保留旧配置：期望 1，得到 %d", v)
+	}
+
+	if err := os.WriteFile(file, []byte("app:\n  version: 2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !waitFor(2*time.Second, func() bool { return conf.GetInt("app.version") == 2 }) {
+		t.Fatal("重新创建配置文件后未恢复重载")
+	}
+}
+
+// TestHandleWatchError 验证监听出错时回调收到错误；事件队列溢出时额外重载一次，其他错误不重载
+func TestHandleWatchError(t *testing.T) {
+	dir, file := writeVersionConfig(t, 1)
+	defer os.RemoveAll(dir)
+
+	// 不启用监听，直接调用错误处理，避免文件事件干扰
+	conf, err := New(WithConfigPaths(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recorder eventRecorder
+	conf.OnConfigChange(recorder.record)
+	if err := os.WriteFile(file, []byte("app:\n  version: 2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	other := errors.New("watch failed")
+	conf.handleWatchError(other, &Options{})
+	if events := recorder.snapshot(); len(events) != 1 || !errors.Is(events[0].Err, other) {
+		t.Fatalf("其他错误应只产生一个携带原错误的事件，得到 %v", events)
+	}
+	if v := conf.GetInt("app.version"); v != 1 {
+		t.Errorf("其他错误不应重载：期望 1，得到 %d", v)
+	}
+
+	conf.handleWatchError(fsnotify.ErrEventOverflow, &Options{})
+	events := recorder.snapshot()
+	if len(events) != 3 || !errors.Is(events[1].Err, fsnotify.ErrEventOverflow) || events[2].Err != nil {
+		t.Fatalf("溢出应先产生错误事件再产生重载成功事件，得到 %v", events)
+	}
+	if v := conf.GetInt("app.version"); v != 2 {
+		t.Errorf("溢出后应重载：期望 2，得到 %d", v)
 	}
 }
 
