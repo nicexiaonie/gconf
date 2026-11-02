@@ -1,14 +1,13 @@
 package gconf
 
 import (
+	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"testing"
-	"time"
 )
 
 func TestInit(t *testing.T) {
@@ -29,362 +28,127 @@ func TestInit(t *testing.T) {
 	}
 }
 
-func TestGetInstance(t *testing.T) {
-	// 重置全局实例
+// TestGetInstancePanicsBeforeInit 验证未调用 Init 时 GetInstance 与包级函数 panic，且不会创建全局实例
+func TestGetInstancePanicsBeforeInit(t *testing.T) {
 	defaultInstance = nil
 
-	instance := GetInstance()
-	if instance == nil {
-		t.Fatal("GetInstance 应该返回非 nil 实例")
-	}
-
-	// 第二次调用应该返回相同实例
-	instance2 := GetInstance()
-	if instance != instance2 {
-		t.Error("GetInstance 应该返回相同的单例")
-	}
-}
-
-// TestGetInstanceWarnsOnAutoInit 验证未调用 Init 时自动初始化只输出一次警告，并注明使用的配置文件或未找到配置文件；调用 Init 不输出该警告
-func TestGetInstanceWarnsOnAutoInit(t *testing.T) {
-	var buf strings.Builder
-	log.SetOutput(&buf)
-	defer log.SetOutput(os.Stderr)
-	defer func() {
+	for name, call := range map[string]func(){
+		"GetInstance": func() { GetInstance() },
+		"GetString":   func() { GetString("app.name") },
+	} {
+		func() {
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Fatalf("%s 在 Init 之前调用应 panic", name)
+				}
+				if msg := fmt.Sprint(r); !strings.Contains(msg, "全局实例未初始化") {
+					t.Errorf("%s panic 信息应说明未初始化，得到: %s", name, msg)
+				}
+			}()
+			call()
+		}()
 		if defaultInstance != nil {
-			defaultInstance.Close()
+			t.Fatalf("%s 不应创建全局实例", name)
 		}
-		defaultInstance = nil
-	}()
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chdir(wd)
-	const warning = "未调用 Init，已使用默认选项自动初始化"
-
-	empty, err := os.MkdirTemp("", "gconf-global")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(empty)
-	if err := os.Chdir(empty); err != nil {
-		t.Fatal(err)
-	}
-	defaultInstance = nil
-	GetInstance()
-	GetInstance()
-	if got := strings.Count(buf.String(), warning); got != 1 {
-		t.Errorf("自动初始化警告应只输出一次，实际 %d 次: %s", got, buf.String())
-	}
-	if !strings.Contains(buf.String(), "未找到配置文件") {
-		t.Errorf("未找到配置文件时警告应注明，得到: %s", buf.String())
-	}
-
-	dir, file := writeVersionConfig(t, 1)
-	defer os.RemoveAll(dir)
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
-	buf.Reset()
-	defaultInstance = nil
-	GetInstance()
-	if !strings.Contains(buf.String(), warning) || !strings.Contains(buf.String(), filepath.Base(file)) {
-		t.Errorf("找到配置文件时警告应注明文件路径，得到: %s", buf.String())
-	}
-
-	buf.Reset()
-	defaultInstance = nil
-	if err := Init(); err != nil {
-		t.Fatal(err)
-	}
-	GetInstance()
-	if strings.Contains(buf.String(), warning) {
-		t.Errorf("调用 Init 后不应输出自动初始化警告，得到: %s", buf.String())
 	}
 }
 
-// TestGetInstancePanicsOnInvalidConfig 验证未调用 Init 且默认配置文件解析失败时，GetInstance 带原始错误 panic
-func TestGetInstancePanicsOnInvalidConfig(t *testing.T) {
+// TestInitOnlyOnce 验证 Init 只能成功一次，再次调用返回 ErrAlreadyInitialized 且全局实例不变
+func TestInitOnlyOnce(t *testing.T) {
+	dir, _ := writeVersionConfig(t, 1)
+	defer os.RemoveAll(dir)
+	defaultInstance = nil
+	defer func() { defaultInstance = nil }()
+
+	if err := Init(WithConfigPaths(dir)); err != nil {
+		t.Fatal(err)
+	}
+	first := GetInstance()
+
+	other, err := os.MkdirTemp("", "gconf-global")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(other)
+	if err := os.WriteFile(filepath.Join(other, "config.yaml"), []byte("app:\n  version: 2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for name, init := range map[string]func(...Option) error{"Init": Init, "InitWithConfig": InitWithConfig} {
+		if err := init(WithConfigPaths(other)); !errors.Is(err, ErrAlreadyInitialized) {
+			t.Errorf("再次调用 %s 应返回 ErrAlreadyInitialized，得到: %v", name, err)
+		}
+	}
+	if GetInstance() != first {
+		t.Error("再次调用 Init 不应替换全局实例")
+	}
+	if v := GetInt("app.version"); v != 1 {
+		t.Errorf("全局配置应保持首次 Init 的值：期望 1，得到 %d", v)
+	}
+}
+
+// TestInitRetryAfterFailure 验证 Init 失败时不设置全局实例，修正后可再次 Init
+func TestInitRetryAfterFailure(t *testing.T) {
 	dir, err := os.MkdirTemp("", "gconf-global")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(dir)
-	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("app: [1, 2\n"), 0644); err != nil {
+	file := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(file, []byte("app: [1, 2\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chdir(wd)
 	defaultInstance = nil
 	defer func() { defaultInstance = nil }()
 
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("期望 GetInstance panic")
-		}
-		if msg := fmt.Sprint(r); !strings.Contains(msg, "While parsing config") {
-			t.Errorf("panic 信息应包含解析错误，得到: %s", msg)
-		}
-		if defaultInstance != nil {
-			t.Error("自动初始化失败时不应设置全局实例")
-		}
-	}()
-	GetInstance()
-}
-
-// TestReInitClosesOldInstance 验证再次 Init 成功后旧实例不再热更新
-func TestReInitClosesOldInstance(t *testing.T) {
-	dir, file := writeVersionConfig(t, 1)
-	defer os.RemoveAll(dir)
-	defer func() {
-		if defaultInstance != nil {
-			defaultInstance.Close()
-		}
-		defaultInstance = nil
-	}()
-
-	opts := []Option{WithConfigPaths(dir), WithWatchConfig(true)}
-	if err := Init(opts...); err != nil {
-		t.Fatal(err)
+	if err := Init(WithConfigPaths(dir)); err == nil {
+		t.Fatal("配置文件解析失败时 Init 应返回错误")
 	}
-	old := GetInstance()
-	if err := Init(opts...); err != nil {
-		t.Fatal(err)
-	}
-	if GetInstance() == old {
-		t.Fatal("再次 Init 应替换全局实例")
+	if defaultInstance != nil {
+		t.Fatal("Init 失败时不应设置全局实例")
 	}
 
-	if err := os.WriteFile(file, []byte("app:\n  version: 2\n"), 0644); err != nil {
+	if err := os.WriteFile(file, []byte("app:\n  version: 1\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if !waitFor(2*time.Second, func() bool { return GetInt("app.version") == 2 }) {
-		t.Fatal("新实例热更新未生效")
+	if err := Init(WithConfigPaths(dir)); err != nil {
+		t.Fatalf("修正配置后再次 Init 应成功: %v", err)
 	}
-	// 留出旧实例若仍在监听时完成重载的时间
-	time.Sleep(200 * time.Millisecond)
-	if v := old.GetInt("app.version"); v != 1 {
-		t.Errorf("旧实例应已关闭不再重载：期望 1，得到 %d", v)
+	if v := GetInt("app.version"); v != 1 {
+		t.Errorf("期望 1，得到 %d", v)
 	}
 }
 
-// TestReInitKeepsHandlers 验证再次 Init 后，之前通过 OnConfigChange 注册的回调迁移到新实例且只触发一次
-func TestReInitKeepsHandlers(t *testing.T) {
-	dir, file := writeVersionConfig(t, 1)
+// TestInitConcurrent 验证并发调用 Init 只有一次成功，其余返回 ErrAlreadyInitialized
+func TestInitConcurrent(t *testing.T) {
+	dir, _ := writeVersionConfig(t, 1)
 	defer os.RemoveAll(dir)
-	defer func() {
-		if defaultInstance != nil {
-			defaultInstance.Close()
+	defaultInstance = nil
+	defer func() { defaultInstance = nil }()
+
+	const n = 20
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = Init(WithConfigPaths(dir))
+		}(i)
+	}
+	wg.Wait()
+
+	succeeded := 0
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			succeeded++
+		case !errors.Is(err, ErrAlreadyInitialized):
+			t.Errorf("并发 Init 返回了非预期错误: %v", err)
 		}
-		defaultInstance = nil
-	}()
-
-	opts := []Option{WithConfigPaths(dir), WithWatchConfig(true)}
-	if err := Init(opts...); err != nil {
-		t.Fatal(err)
 	}
-	var called int32
-	OnConfigChange(func(e ChangeEvent) {
-		if e.Err == nil {
-			atomic.AddInt32(&called, 1)
-		}
-	})
-	if err := Init(opts...); err != nil {
-		t.Fatal(err)
-	}
-
-	// 追加写入只产生一个写事件，便于断言回调恰好触发一次
-	appendFile(t, file, "  name: demo\n")
-	if !waitFor(2*time.Second, func() bool { return atomic.LoadInt32(&called) >= 1 }) {
-		t.Fatal("再次 Init 后已注册的回调未触发")
-	}
-	// 留出旧实例若仍在监听时重复触发的时间
-	time.Sleep(200 * time.Millisecond)
-	if n := atomic.LoadInt32(&called); n != 1 {
-		t.Errorf("回调应只触发一次，实际 %d 次", n)
-	}
-}
-
-// TestReInitSerializesCallbacks 验证再次 Init 时，旧实例正在执行的回调结束前新实例不会开始执行回调，同一回调不会被新旧实例同时执行
-func TestReInitSerializesCallbacks(t *testing.T) {
-	dir, file := writeVersionConfig(t, 1)
-	defer os.RemoveAll(dir)
-	defer func() {
-		if defaultInstance != nil {
-			defaultInstance.Close()
-		}
-		defaultInstance = nil
-	}()
-
-	opts := []Option{WithConfigPaths(dir), WithWatchConfig(true)}
-	if err := Init(opts...); err != nil {
-		t.Fatal(err)
-	}
-	var entered, running, overlapped int32
-	started := make(chan struct{})
-	release := make(chan struct{})
-	OnConfigChange(func(ChangeEvent) {
-		if atomic.AddInt32(&running, 1) > 1 {
-			atomic.StoreInt32(&overlapped, 1)
-		}
-		defer atomic.AddInt32(&running, -1)
-		if atomic.AddInt32(&entered, 1) == 1 {
-			close(started)
-			<-release
-		}
-	})
-
-	appendFile(t, file, "  name: demo\n")
-	select {
-	case <-started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("旧实例回调未触发")
-	}
-	if err := Init(opts...); err != nil {
-		t.Fatal(err)
-	}
-	appendFile(t, file, "  env: test\n")
-	// 回调被阻塞不影响新实例重载
-	if !waitFor(2*time.Second, func() bool { return GetString("app.env") == "test" }) {
-		t.Fatal("新实例热更新未生效")
-	}
-	time.Sleep(200 * time.Millisecond)
-	if n := atomic.LoadInt32(&entered); n != 1 {
-		t.Errorf("旧实例回调结束前新实例不应执行回调，实际进入 %d 次", n)
-	}
-
-	close(release)
-	if !waitFor(2*time.Second, func() bool { return atomic.LoadInt32(&entered) >= 2 }) {
-		t.Fatal("旧实例回调结束后新实例应执行回调")
-	}
-	if atomic.LoadInt32(&overlapped) != 0 {
-		t.Error("同一回调被新旧实例同时执行")
-	}
-}
-
-// TestInitInCallback 验证在回调中再次调用 Init 不会死锁，回调继承到新实例后继续生效
-func TestInitInCallback(t *testing.T) {
-	dir, file := writeVersionConfig(t, 1)
-	defer os.RemoveAll(dir)
-	defer func() {
-		if defaultInstance != nil {
-			defaultInstance.Close()
-		}
-		defaultInstance = nil
-	}()
-
-	opts := []Option{WithConfigPaths(dir), WithWatchConfig(true)}
-	if err := Init(opts...); err != nil {
-		t.Fatal(err)
-	}
-	old := GetInstance()
-	var calls int32
-	OnConfigChange(func(ChangeEvent) {
-		if atomic.AddInt32(&calls, 1) == 1 {
-			if err := Init(opts...); err != nil {
-				t.Errorf("回调中 Init 失败: %v", err)
-			}
-		}
-	})
-
-	appendFile(t, file, "  name: demo\n")
-	if !waitFor(2*time.Second, func() bool { return atomic.LoadInt32(&calls) >= 1 }) {
-		t.Fatal("回调未触发")
-	}
-	if !waitFor(2*time.Second, func() bool { return GetInstance() != old }) {
-		t.Fatal("回调中调用 Init 未完成，可能死锁")
-	}
-	appendFile(t, file, "  env: test\n")
-	if !waitFor(2*time.Second, func() bool { return atomic.LoadInt32(&calls) >= 2 }) {
-		t.Fatal("回调中 Init 后回调未在新实例上继续生效")
-	}
-}
-
-// TestReInitConcurrentWrites 反复 Init 的同时持续以 rename 覆盖方式修改配置文件，
-// 验证回调不会重叠执行，且最终读到最后写入的值。时序窗口无法稳定复现，属概率性验证
-func TestReInitConcurrentWrites(t *testing.T) {
-	dir, file := writeVersionConfig(t, 0)
-	defer os.RemoveAll(dir)
-	defer func() {
-		if defaultInstance != nil {
-			defaultInstance.Close()
-		}
-		defaultInstance = nil
-	}()
-
-	// 临时文件放在监听目录之外：macOS 上 fsnotify 注册目录监听时会逐个监听目录内文件，
-	// 目录内文件恰好被 rename 移走会导致注册失败，与本测试验证的 Init 行为无关
-	tmpDir, err := os.MkdirTemp(filepath.Dir(dir), "gconf-tmp")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
-	write := func(version int) error {
-		tmp := filepath.Join(tmpDir, "config.yaml")
-		if err := os.WriteFile(tmp, fmt.Appendf(nil, "app:\n  version: %d\n", version), 0644); err != nil {
-			return err
-		}
-		return os.Rename(tmp, file)
-	}
-	opts := []Option{WithConfigPaths(dir), WithWatchConfig(true)}
-	if err := Init(opts...); err != nil {
-		t.Fatal(err)
-	}
-	var running, overlapped int32
-	OnConfigChange(func(ChangeEvent) {
-		if atomic.AddInt32(&running, 1) > 1 {
-			atomic.StoreInt32(&overlapped, 1)
-		}
-		time.Sleep(time.Millisecond)
-		atomic.AddInt32(&running, -1)
-	})
-
-	stop := make(chan struct{})
-	writerDone := make(chan struct{})
-	go func() {
-		defer close(writerDone)
-		for v := 1; ; v++ {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			if err := write(v); err != nil {
-				t.Errorf("写入配置失败: %v", err)
-				return
-			}
-			time.Sleep(time.Millisecond)
-		}
-	}()
-	var initErr error
-	for i := 0; i < 20 && initErr == nil; i++ {
-		if err := Init(opts...); err != nil {
-			initErr = fmt.Errorf("第 %d 次 Init 失败: %w", i+1, err)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	close(stop)
-	<-writerDone
-	if initErr != nil {
-		t.Fatal(initErr)
-	}
-
-	if err := write(-1); err != nil {
-		t.Fatal(err)
-	}
-	if !waitFor(2*time.Second, func() bool { return GetInt("app.version") == -1 }) {
-		t.Fatalf("未读到最后写入的值，得到 %d", GetInt("app.version"))
-	}
-	if atomic.LoadInt32(&overlapped) != 0 {
-		t.Error("回调重叠执行")
+	if succeeded != 1 {
+		t.Errorf("并发 Init 应恰好成功一次，实际 %d 次", succeeded)
 	}
 }
 
@@ -550,20 +314,13 @@ func TestInitWithConfig(t *testing.T) {
 	// 重置全局实例
 	defaultInstance = nil
 
-	// 第一次初始化
-	err := Init(WithConfigName("test1"))
+	err := InitWithConfig(WithConfigName("test2"))
 	if err != nil {
-		t.Logf("第一次初始化时出错: %v", err)
-	}
-
-	// 使用 InitWithConfig 重新初始化
-	err = InitWithConfig(WithConfigName("test2"))
-	if err != nil {
-		t.Logf("重新初始化时出错: %v", err)
+		t.Logf("初始化时出错: %v", err)
 	}
 
 	instance := GetInstance()
 	if instance == nil {
-		t.Fatal("重新初始化后实例不应为 nil")
+		t.Fatal("初始化后实例不应为 nil")
 	}
 }

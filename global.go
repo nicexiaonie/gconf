@@ -1,8 +1,7 @@
 package gconf
 
 import (
-	"fmt"
-	"log"
+	"errors"
 	"sync"
 )
 
@@ -12,23 +11,22 @@ var (
 	defaultInstanceMu sync.RWMutex
 )
 
-// Init 初始化全局配置实例（建议在应用启动时调用）
-// 可多次调用，每次调用都会用新的选项重新初始化，确保传入的配置生效；
-// 新实例在开始监听前继承旧实例上通过 OnConfigChange 注册的回调，初始化成功后关闭旧实例，旧实例不再热更新；
-// 旧实例正在执行的回调结束前新实例不会开始执行回调，同一回调不会被新旧实例同时执行；
-// WithOnConfigChange 传入的回调不迁移，以本次传入的选项为准。初始化失败时旧实例保持不变
+// ErrAlreadyInitialized 全局实例已初始化后再次调用 Init 时返回
+var ErrAlreadyInitialized = errors.New("gconf: 全局实例已初始化，Init 只能成功调用一次；需要多份配置请使用 New")
+
+// Init 初始化全局配置实例，应在应用启动时、读取任何全局配置之前调用。
+// 只能成功调用一次，之后再调用返回 ErrAlreadyInitialized，全局实例保持不变；
+// 初始化失败时不设置全局实例，可修正后重试
 func Init(opts ...Option) error {
 	defaultInstanceMu.Lock()
 	defer defaultInstanceMu.Unlock()
 
-	instance, err := newGconf(defaultInstance, opts...)
+	if defaultInstance != nil {
+		return ErrAlreadyInitialized
+	}
+	instance, err := New(opts...)
 	if err != nil {
 		return err
-	}
-	if defaultInstance != nil {
-		if err := defaultInstance.Close(); err != nil {
-			log.Printf("[gconf] 关闭旧的全局实例失败: %v", err)
-		}
 	}
 	defaultInstance = instance
 	return nil
@@ -39,32 +37,13 @@ func InitWithConfig(opts ...Option) error {
 	return Init(opts...)
 }
 
-// GetInstance 获取全局配置实例
-// 如果未调用 Init 进行初始化，将使用默认配置自动初始化并输出一条警告日志，注明使用的配置文件；
-// 自动初始化失败（如配置文件解析失败）时 panic
+// GetInstance 获取全局配置实例。
+// 未调用 Init 或 Init 未成功时 panic：在 Init 之前读取全局配置属于调用顺序错误
 func GetInstance() *Gconf {
 	defaultInstanceMu.RLock()
-	if defaultInstance != nil {
-		defer defaultInstanceMu.RUnlock()
-		return defaultInstance
-	}
-	defaultInstanceMu.RUnlock()
-
-	// 双重检查锁定：仅在未初始化时使用默认配置兜底
-	defaultInstanceMu.Lock()
-	defer defaultInstanceMu.Unlock()
+	defer defaultInstanceMu.RUnlock()
 	if defaultInstance == nil {
-		instance, err := New()
-		if err != nil {
-			panic(fmt.Sprintf("gconf: 未调用 Init，使用默认选项自动初始化失败: %v（应在启动时调用 Init 并检查错误）", err))
-		}
-		// 默认选项按当前工作目录查找配置文件，结果随启动目录变化，需提示实际使用的文件
-		if file := instance.ConfigFileUsed(); file != "" {
-			log.Printf("[gconf] 警告: 未调用 Init，已使用默认选项自动初始化，配置文件: %s（应在启动时调用 Init）", file)
-		} else {
-			log.Printf("[gconf] 警告: 未调用 Init，已使用默认选项自动初始化，未找到配置文件，配置为空（应在启动时调用 Init）")
-		}
-		defaultInstance = instance
+		panic("gconf: 全局实例未初始化，应在启动时先调用 Init 并检查错误，再读取全局配置")
 	}
 	return defaultInstance
 }

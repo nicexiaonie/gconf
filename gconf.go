@@ -25,9 +25,6 @@ type Gconf struct {
 	viperMu          sync.RWMutex
 	mu               sync.RWMutex
 	onChangeHandlers []func(ChangeEvent)
-	// callbackMu 执行一轮回调时持有；Init 替换实例时新实例沿用旧实例的锁，
-	// 使旧实例正在执行的回调结束前，新实例不会开始执行回调
-	callbackMu *sync.Mutex
 	// decoderOptions 解析结构体时传给 viper 的解码选项，由 Options.TagName 决定
 	decoderOptions []viper.DecoderConfigOption
 	// watcher 监听配置文件变化，未启用监听时为 nil；done 在 Close 时关闭，通知监听循环退出
@@ -71,12 +68,6 @@ type Options struct {
 
 // New 创建一个新的配置管理器实例
 func New(opts ...Option) (*Gconf, error) {
-	return newGconf(nil, opts...)
-}
-
-// newGconf 创建配置管理器实例。inherit 非 nil 时（Init 替换全局实例），
-// 在开始监听前继承其通过 OnConfigChange 注册的回调与回调锁，避免监听启动后、继承完成前的变化漏掉这些回调
-func newGconf(inherit *Gconf, opts ...Option) (*Gconf, error) {
 	options := &Options{
 		ConfigPaths: []string{".", "./config"},
 		ConfigName:  "config",
@@ -93,13 +84,6 @@ func newGconf(inherit *Gconf, opts ...Option) (*Gconf, error) {
 		viper:            newViper(),
 		onChangeHandlers: make([]func(ChangeEvent), 0),
 		decoderOptions:   decoderOptions(options.TagName),
-		callbackMu:       &sync.Mutex{},
-	}
-	if inherit != nil {
-		inherit.mu.RLock()
-		g.onChangeHandlers = append(g.onChangeHandlers, inherit.onChangeHandlers...)
-		inherit.mu.RUnlock()
-		g.callbackMu = inherit.callbackMu
 	}
 
 	// 设置配置文件路径
@@ -264,11 +248,8 @@ func (g *Gconf) reload(options *Options) {
 
 // notify 执行变更回调。
 // 回调在监听 goroutine 中按顺序同步执行，保证回调顺序与重载顺序一致；
-// 持有回调锁执行，Close 后不再开始执行剩余的回调
+// Close 后不再开始执行剩余的回调
 func (g *Gconf) notify(event ChangeEvent, options *Options) {
-	g.callbackMu.Lock()
-	defer g.callbackMu.Unlock()
-
 	// 先执行自定义回调，再执行注册的所有回调
 	g.mu.RLock()
 	handlers := make([]func(ChangeEvent), 0, len(g.onChangeHandlers)+1)
