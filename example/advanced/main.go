@@ -5,7 +5,6 @@ import (
 	"log"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/nicexiaonie/gconf"
 )
 
@@ -62,8 +61,12 @@ func main() {
 		gconf.WithEnvPrefix("MYAPP"),       // 环境变量前缀 MYAPP_
 		gconf.WithEnvKeyReplacer(".", "_"), // 将配置键中的.替换为_用于环境变量
 		gconf.WithDebug(true),              // 启用调试日志
-		gconf.WithOnConfigChange(func(e fsnotify.Event) {
-			log.Printf("配置文件发生变化: %s", e.Name)
+		gconf.WithOnConfigChange(func(e gconf.ChangeEvent) {
+			if e.Err != nil {
+				log.Printf("配置文件重载失败，保留旧配置: %v", e.Err)
+				return
+			}
+			log.Printf("配置文件已重载: %s", e.File)
 		}),
 	)
 
@@ -76,8 +79,11 @@ func main() {
 	setDefaults(conf)
 
 	// 注册配置变化回调
-	conf.OnConfigChange(func(e fsnotify.Event) {
-		fmt.Printf(">>> 配置已更新，操作类型: %s\n", e.Op)
+	conf.OnConfigChange(func(e gconf.ChangeEvent) {
+		if e.Err != nil {
+			return
+		}
+		fmt.Printf(">>> 配置已更新: %s\n", e.File)
 		// 在这里可以重新加载配置或执行其他操作
 	})
 

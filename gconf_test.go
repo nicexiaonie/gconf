@@ -8,8 +8,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/fsnotify/fsnotify"
 )
 
 func TestNew(t *testing.T) {
@@ -259,7 +257,7 @@ func TestAllSettings(t *testing.T) {
 func TestOnConfigChange(t *testing.T) {
 	conf, _ := New()
 
-	conf.OnConfigChange(func(e fsnotify.Event) {
+	conf.OnConfigChange(func(e ChangeEvent) {
 		// 回调函数
 	})
 
@@ -394,7 +392,7 @@ func TestCloseStopsReload(t *testing.T) {
 	conf, err := New(
 		WithConfigPaths(dir),
 		WithWatchConfig(true),
-		WithOnConfigChange(func(fsnotify.Event) { atomic.AddInt32(&called, 1) }),
+		WithOnConfigChange(func(ChangeEvent) { atomic.AddInt32(&called, 1) }),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -422,6 +420,131 @@ func TestCloseStopsReload(t *testing.T) {
 	}
 	if after := atomic.LoadInt32(&called); after != before {
 		t.Errorf("Close 后不应触发回调：调用次数由 %d 变为 %d", before, after)
+	}
+}
+
+// appendFile 以单次写入向文件末尾追加内容，不截断文件，每次只产生一个写事件
+func appendFile(t *testing.T, file, content string) {
+	t.Helper()
+	f, err := os.OpenFile(file, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestReloadCallbackReportsResult 验证重载失败与成功都执行回调：失败时 Err 非 nil 且保留旧配置，成功时 Err 为 nil 且读到新配置
+func TestReloadCallbackReportsResult(t *testing.T) {
+	dir, file := writeVersionConfig(t, 1)
+	defer os.RemoveAll(dir)
+
+	type result struct {
+		event   ChangeEvent
+		version int
+	}
+	optionEvents := make(chan result, 10)
+	handlerEvents := make(chan result, 10)
+	// 监听 goroutine 在 New 返回前已启动，经原子指针读取实例，避免与赋值产生数据竞争
+	var instance atomic.Pointer[Gconf]
+	conf, err := New(
+		WithConfigPaths(dir),
+		WithWatchConfig(true),
+		WithOnConfigChange(func(e ChangeEvent) { optionEvents <- result{e, instance.Load().GetInt("app.version")} }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance.Store(conf)
+	defer conf.Close()
+	conf.OnConfigChange(func(e ChangeEvent) { handlerEvents <- result{e, conf.GetInt("app.version")} })
+
+	// receive 接收回调结果直到 done 满足；覆盖写入时截断与写入可能各触发一次重载，中间结果跳过
+	receive := func(ch chan result, name string, done func(result) bool) result {
+		t.Helper()
+		timeout := time.After(2 * time.Second)
+		for {
+			select {
+			case r := <-ch:
+				if done(r) {
+					return r
+				}
+			case <-timeout:
+				t.Fatalf("%s 未执行", name)
+				return result{}
+			}
+		}
+	}
+	first := func(result) bool { return true }
+	reloaded := func(r result) bool { return r.event.Err == nil && r.version == 2 }
+	wantFile, _ := filepath.EvalSymlinks(file)
+	check := func(r result, name string, wantErr bool, wantVersion int) {
+		t.Helper()
+		if gotFile, _ := filepath.EvalSymlinks(r.event.File); gotFile != wantFile {
+			t.Errorf("%s: File 期望 %s，得到 %s", name, wantFile, r.event.File)
+		}
+		if (r.event.Err != nil) != wantErr {
+			t.Errorf("%s: Err 期望非 nil=%v，得到 %v", name, wantErr, r.event.Err)
+		}
+		if r.version != wantVersion {
+			t.Errorf("%s: 回调中读到 version 期望 %d，得到 %d", name, wantVersion, r.version)
+		}
+	}
+
+	// 追加使 YAML 非法，不截断文件，确保失败前不会出现读到空文件的中间重载
+	appendFile(t, file, "app: [\n")
+	check(receive(optionEvents, "失败时 WithOnConfigChange 回调", first), "失败时 WithOnConfigChange 回调", true, 1)
+	check(receive(handlerEvents, "失败时 OnConfigChange 回调", first), "失败时 OnConfigChange 回调", true, 1)
+
+	if err := os.WriteFile(file, []byte("app:\n  version: 2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	check(receive(optionEvents, "成功时 WithOnConfigChange 回调", reloaded), "成功时 WithOnConfigChange 回调", false, 2)
+	check(receive(handlerEvents, "成功时 OnConfigChange 回调", reloaded), "成功时 OnConfigChange 回调", false, 2)
+}
+
+// TestCallbacksRunInOrder 验证回调按 WithOnConfigChange、注册顺序同步执行，前一个回调返回后才执行下一个
+func TestCallbacksRunInOrder(t *testing.T) {
+	dir, file := writeVersionConfig(t, 1)
+	defer os.RemoveAll(dir)
+
+	var mu sync.Mutex
+	var order []string
+	record := func(name string) {
+		mu.Lock()
+		order = append(order, name)
+		mu.Unlock()
+	}
+	conf, err := New(
+		WithConfigPaths(dir),
+		WithWatchConfig(true),
+		WithOnConfigChange(func(ChangeEvent) { record("option") }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conf.Close()
+	conf.OnConfigChange(func(ChangeEvent) {
+		// 若回调并发执行，后注册的回调会先记录
+		time.Sleep(100 * time.Millisecond)
+		record("first")
+	})
+	conf.OnConfigChange(func(ChangeEvent) { record("second") })
+
+	appendFile(t, file, "  name: demo\n")
+	if !waitFor(2*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(order) >= 3
+	}) {
+		t.Fatal("回调未全部执行")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got := fmt.Sprint(order[:3]); got != "[option first second]" {
+		t.Errorf("回调执行顺序期望 [option first second]，得到 %s", got)
 	}
 }
 

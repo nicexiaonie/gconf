@@ -143,14 +143,18 @@ import (
     "log"
     "time"
 
-    "github.com/fsnotify/fsnotify"
     "github.com/nicexiaonie/gconf"
 )
 
 func main() {
     err := gconf.Init(
         gconf.WithWatchConfig(true),
-        gconf.WithOnConfigChange(func(e fsnotify.Event) {
+        gconf.WithOnConfigChange(func(e gconf.ChangeEvent) {
+            // 重载失败时 Err 非 nil，配置保持旧值
+            if e.Err != nil {
+                log.Printf("配置重载失败: %v", e.Err)
+                return
+            }
             // 回调在重载完成后执行，可直接读取新配置
             fmt.Println("配置已更新，新端口:", gconf.GetInt("app.port"))
         }),

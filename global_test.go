@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -112,6 +113,43 @@ func TestReInitClosesOldInstance(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if v := old.GetInt("app.version"); v != 1 {
 		t.Errorf("旧实例应已关闭不再重载：期望 1，得到 %d", v)
+	}
+}
+
+// TestReInitKeepsHandlers 验证再次 Init 后，之前通过 OnConfigChange 注册的回调迁移到新实例且只触发一次
+func TestReInitKeepsHandlers(t *testing.T) {
+	dir, file := writeVersionConfig(t, 1)
+	defer os.RemoveAll(dir)
+	defer func() {
+		if defaultInstance != nil {
+			defaultInstance.Close()
+		}
+		defaultInstance = nil
+	}()
+
+	opts := []Option{WithConfigPaths(dir), WithWatchConfig(true)}
+	if err := Init(opts...); err != nil {
+		t.Fatal(err)
+	}
+	var called int32
+	OnConfigChange(func(e ChangeEvent) {
+		if e.Err == nil {
+			atomic.AddInt32(&called, 1)
+		}
+	})
+	if err := Init(opts...); err != nil {
+		t.Fatal(err)
+	}
+
+	// 追加写入只产生一个写事件，便于断言回调恰好触发一次
+	appendFile(t, file, "  name: demo\n")
+	if !waitFor(2*time.Second, func() bool { return atomic.LoadInt32(&called) >= 1 }) {
+		t.Fatal("再次 Init 后已注册的回调未触发")
+	}
+	// 留出旧实例若仍在监听时重复触发的时间
+	time.Sleep(200 * time.Millisecond)
+	if n := atomic.LoadInt32(&called); n != 1 {
+		t.Errorf("回调应只触发一次，实际 %d 次", n)
 	}
 }
 

@@ -119,8 +119,8 @@ gconf.Init(
 ```go
 gconf.Init(
     gconf.WithWatchConfig(true),
-    gconf.WithOnConfigChange(func(e fsnotify.Event) {
-        // 处理配置更新
+    gconf.WithOnConfigChange(func(e gconf.ChangeEvent) {
+        // 处理配置更新，e.Err 非 nil 表示重载失败
     }),
 )
 

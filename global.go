@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"log"
 	"sync"
-
-	"github.com/fsnotify/fsnotify"
 )
 
 var (
@@ -16,7 +14,8 @@ var (
 
 // Init 初始化全局配置实例（建议在应用启动时调用）
 // 可多次调用，每次调用都会用新的选项重新初始化，确保传入的配置生效；
-// 初始化成功后关闭被替换的旧实例，旧实例不再热更新，初始化失败时旧实例保持不变
+// 初始化成功后将旧实例上通过 OnConfigChange 注册的回调迁移到新实例，并关闭旧实例，旧实例不再热更新；
+// WithOnConfigChange 传入的回调不迁移，以本次传入的选项为准。初始化失败时旧实例保持不变
 func Init(opts ...Option) error {
 	defaultInstanceMu.Lock()
 	defer defaultInstanceMu.Unlock()
@@ -26,6 +25,13 @@ func Init(opts ...Option) error {
 		return err
 	}
 	if defaultInstance != nil {
+		defaultInstance.mu.RLock()
+		handlers := append([]func(ChangeEvent){}, defaultInstance.onChangeHandlers...)
+		defaultInstance.mu.RUnlock()
+		instance.mu.Lock()
+		instance.onChangeHandlers = append(handlers, instance.onChangeHandlers...)
+		instance.mu.Unlock()
+
 		if err := defaultInstance.Close(); err != nil {
 			log.Printf("[gconf] 关闭旧的全局实例失败: %v", err)
 		}
@@ -174,8 +180,8 @@ func ConfigFileUsed() string {
 	return GetInstance().ConfigFileUsed()
 }
 
-// OnConfigChange 注册配置变化回调函数
-func OnConfigChange(fn func(fsnotify.Event)) {
+// OnConfigChange 注册配置变化回调函数，重载成功与失败都会执行，通过 ChangeEvent.Err 区分
+func OnConfigChange(fn func(ChangeEvent)) {
 	GetInstance().OnConfigChange(fn)
 }
 

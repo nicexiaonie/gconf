@@ -131,7 +131,7 @@ func main() {
 | `WithConfigName(name string)` | `"config"` | 配置文件名，不含扩展名；传空字符串无效，仍使用默认值 |
 | `WithConfigType(t string)` | 空 | 配置类型，如 `yaml`、`json`、`toml`、`properties`；为空时按扩展名识别 |
 | `WithWatchConfig(watch bool)` | `false` | 是否监听配置文件变化并自动重载 |
-| `WithOnConfigChange(fn)` | 无 | 配置重载后执行的回调，见 [热更新](#热更新) |
+| `WithOnConfigChange(fn)` | 无 | 配置重载后执行的回调，成功与失败都会执行，见 [热更新](#热更新) |
 | `WithAutomaticEnv(auto bool)` | `false` | 读取配置时自动查找对应的环境变量 |
 | `WithEnvPrefix(prefix string)` | 空 | 环境变量前缀，仅在启用 `AutomaticEnv` 时生效 |
 | `WithEnvKeyReplacer(oldNew ...string)` | 无 | 配置 key 到环境变量名的替换规则，如 `WithEnvKeyReplacer(".", "_")`；仅在启用 `AutomaticEnv` 时生效 |
@@ -174,6 +174,8 @@ port := gconf.GetInt("server.port")
 ```
 
 - `Init` 可重复调用，每次都用新选项创建新实例并替换全局实例；替换成功后旧实例被 `Close()`，不再热更新，创建失败时旧实例保持不变
+- 替换时，旧实例上通过 `OnConfigChange` 注册的回调按原顺序迁移到新实例；`WithOnConfigChange` 传入的回调不迁移，以本次 `Init` 传入的选项为准。`Init` 本身不触发回调，重复 `Init` 后如需按新配置更新业务状态，应自行重新读取
+- 不要长期持有 `GetInstance()` 的返回值：重复 `Init` 后它指向已关闭的旧实例，值不再更新；应使用包级函数或每次重新调用 `GetInstance()`
 - `InitWithConfig` 与 `Init` 行为一致，为兼容旧版本保留
 - `GetInstance()` 返回全局实例；未调用 `Init` 时使用默认选项自动创建，**创建失败（如配置文件解析失败）时 `GetInstance` 及所有包级函数会直接 panic，panic 信息包含原始错误**。生产代码应在启动时调用 `Init` 并检查错误
 - 包级函数只覆盖常用方法，其余方法通过 `gconf.GetInstance()` 调用，见 [API 速查](#api-速查)
@@ -326,27 +328,36 @@ conf.BindEnv("api.token", "CUSTOM_TOKEN") // 指定环境变量名
 ```go
 conf, err := gconf.New(
     gconf.WithWatchConfig(true),
-    gconf.WithOnConfigChange(func(e fsnotify.Event) {
-        log.Printf("配置已重载: %s", e.Name)
+    gconf.WithOnConfigChange(func(e gconf.ChangeEvent) {
+        if e.Err != nil {
+            // 重载失败，配置保持上一次成功加载的内容，可在此告警
+            log.Printf("配置重载失败: %s: %v", e.File, e.Err)
+            return
+        }
+        log.Printf("配置已重载: %s", e.File)
     }),
 )
 
 // 也可在创建后注册，可注册多个
-conf.OnConfigChange(func(e fsnotify.Event) {
+conf.OnConfigChange(func(e gconf.ChangeEvent) {
     // ...
 })
 ```
 
 ### 回调语义
 
-| 回调 | 执行时机 | 执行方式 |
-|---|---|---|
-| `WithOnConfigChange` | 配置重载完成后 | 在监听 goroutine 中同步执行 |
-| `OnConfigChange` 注册的回调 | 配置重载完成后 | 每个回调在独立 goroutine 中执行 |
+回调参数 `gconf.ChangeEvent`：
 
+| 字段 | 说明 |
+|---|---|
+| `File` | 当前使用的配置文件路径 |
+| `Err` | 为 nil 表示重载成功、新配置已生效；非 nil 表示重载失败（如文件内容解析错误），配置保持上一次成功加载的内容 |
+
+- 每次配置文件变化触发一次重载，重载成功与失败都会执行回调，通过 `Err` 区分；失败时 gconf 同时输出一条日志
+- 回调在监听 goroutine 中按顺序同步执行：先执行 `WithOnConfigChange`，再按注册顺序执行 `OnConfigChange` 注册的回调；回调顺序与重载顺序一致
+- 下一次重载在本次所有回调返回后才开始，回调应尽快返回，耗时操作请在回调中自行启动 goroutine
 - 回调只在启用 `WithWatchConfig(true)` 时触发
 - 回调执行时重载已完成且锁已释放，可在回调中安全读取配置
-- 重载失败（如文件内容解析错误）会输出日志，回调仍会执行
 
 ### 停止监听
 
@@ -365,7 +376,7 @@ conf.OnConfigChange(func(e fsnotify.Event) {
 
 ### 业务配置更新建议
 
-对结构体配置，在回调中重新解析并校验，成功后原子替换：
+对结构体配置，在重载成功的回调中重新解析并校验，成功后原子替换：
 
 ```go
 var current atomic.Value // 存放 *Config
@@ -380,7 +391,11 @@ reload := func() {
     current.Store(&cfg)
 }
 reload()
-conf.OnConfigChange(func(fsnotify.Event) { reload() })
+conf.OnConfigChange(func(e gconf.ChangeEvent) {
+    if e.Err == nil {
+        reload()
+    }
+})
 ```
 
 连接池等资源应先创建并检查新实例，再切换引用，最后关闭旧实例。
@@ -529,6 +544,7 @@ make example       # 运行全部示例
 2. 回调未执行时，确认回调注册在同一个实例上
 3. 值没有变化时，检查该 key 是否被 `Set` 覆盖或被环境变量遮蔽
 4. 结构体配置不会自动更新，需要在回调中重新 `Unmarshal`
+5. 值没有更新但回调已执行时，检查回调参数的 `Err`，重载失败时配置保持旧值
 
 ### 容器中使用
 

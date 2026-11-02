@@ -22,13 +22,21 @@ type Gconf struct {
 	// viperMu 保护 viper 实例：读取加读锁，修改与重载加写锁（viper 本身不保证并发安全）
 	viperMu          sync.RWMutex
 	mu               sync.RWMutex
-	onChangeHandlers []func(fsnotify.Event)
+	onChangeHandlers []func(ChangeEvent)
 	// decoderOptions 解析结构体时传给 viper 的解码选项，由 Options.TagName 决定
 	decoderOptions []viper.DecoderConfigOption
 	// watcher 监听配置文件变化，未启用监听时为 nil；done 在 Close 时关闭，通知监听循环退出
 	watcher   *fsnotify.Watcher
 	done      chan struct{}
 	closeOnce sync.Once
+}
+
+// ChangeEvent 配置文件变化后一次重载的结果
+type ChangeEvent struct {
+	// File 当前使用的配置文件路径
+	File string
+	// Err 为 nil 表示重载成功、新配置已生效；非 nil 表示重载失败，配置保持上一次成功加载的内容
+	Err error
 }
 
 // Options 配置选项
@@ -48,8 +56,8 @@ type Options struct {
 	EnvPrefix string
 	// 环境变量键的替换规则（例如将 . 替换为 _）
 	EnvKeyReplacer *strings.Replacer
-	// 配置变化回调函数
-	OnConfigChange func(fsnotify.Event)
+	// 配置变化回调函数，重载成功与失败都会执行
+	OnConfigChange func(ChangeEvent)
 	// 是否启用调试日志
 	Debug bool
 	// 解析结构体时匹配字段使用的标签名（如 json、toml），为空时使用 viper 默认的 mapstructure
@@ -72,7 +80,7 @@ func New(opts ...Option) (*Gconf, error) {
 
 	g := &Gconf{
 		viper:            newViper(),
-		onChangeHandlers: make([]func(fsnotify.Event), 0),
+		onChangeHandlers: make([]func(ChangeEvent), 0),
 		decoderOptions:   decoderOptions(options.TagName),
 	}
 
@@ -199,20 +207,23 @@ func (g *Gconf) watchConfig(options *Options) error {
 	return nil
 }
 
-// handleConfigChange 重载配置并执行变更回调
+// handleConfigChange 重载配置并执行变更回调。
+// 回调在监听 goroutine 中按顺序同步执行，保证回调顺序与重载顺序一致
 func (g *Gconf) handleConfigChange(e fsnotify.Event, options *Options) {
 	if options.Debug {
 		log.Printf("[gconf] 配置文件变化: %s, 操作: %s", e.Name, e.Op)
 	}
 
 	// 回调中通常会读取配置，必须在释放写锁后再执行回调
-	if err := g.ReadInConfig(); err != nil {
+	err := g.ReadInConfig()
+	if err != nil {
 		log.Printf("[gconf] 重新加载配置文件失败: %v", err)
 	}
+	event := ChangeEvent{File: g.ConfigFileUsed(), Err: err}
 
 	// 执行自定义回调
 	if options.OnConfigChange != nil {
-		options.OnConfigChange(e)
+		options.OnConfigChange(event)
 	}
 
 	// 执行注册的所有回调
@@ -221,7 +232,7 @@ func (g *Gconf) handleConfigChange(e fsnotify.Event, options *Options) {
 	g.mu.RUnlock()
 
 	for _, handler := range handlers {
-		go handler(e)
+		handler(event)
 	}
 }
 
@@ -292,8 +303,8 @@ func WithEnvKeyReplacer(oldNew ...string) Option {
 	}
 }
 
-// WithOnConfigChange 设置配置变化回调
-func WithOnConfigChange(fn func(fsnotify.Event)) Option {
+// WithOnConfigChange 设置配置变化回调，重载成功与失败都会执行，通过 ChangeEvent.Err 区分
+func WithOnConfigChange(fn func(ChangeEvent)) Option {
 	return func(o *Options) {
 		o.OnConfigChange = fn
 	}
@@ -325,8 +336,8 @@ func decoderOptions(tagName string) []viper.DecoderConfigOption {
 	}}
 }
 
-// OnConfigChange 注册配置变化回调函数
-func (g *Gconf) OnConfigChange(fn func(fsnotify.Event)) {
+// OnConfigChange 注册配置变化回调函数，重载成功与失败都会执行，通过 ChangeEvent.Err 区分
+func (g *Gconf) OnConfigChange(fn func(ChangeEvent)) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.onChangeHandlers = append(g.onChangeHandlers, fn)
@@ -580,7 +591,7 @@ func (g *Gconf) Sub(key string) *Gconf {
 	}
 	return &Gconf{
 		viper:            subViper,
-		onChangeHandlers: make([]func(fsnotify.Event), 0),
+		onChangeHandlers: make([]func(ChangeEvent), 0),
 		decoderOptions:   g.decoderOptions,
 	}
 }

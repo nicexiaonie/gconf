@@ -20,6 +20,9 @@
 - **再次调用 `Init` 时关闭被替换的旧实例**：此前旧实例的文件监听无法停止，goroutine 与文件句柄泄漏，旧实例的回调仍会触发
 - **配置文件监听改由 gconf 自行实现**，不再借助额外的 viper 实例：每次变更只解析一次配置文件；触发重载的判定规则与 viper 一致，含 symlink 切换
 - 创建或注册文件监听失败时 `New()` 返回错误；此前创建失败会由 viper 直接 `log.Fatal` 退出进程，注册目录失败被静默忽略
+- **配置变化回调可区分重载成功与失败**：回调参数改为 `gconf.ChangeEvent`，`Err` 非 nil 表示重载失败、配置保持旧值；此前失败时回调照常执行且无法得知失败
+- **回调按顺序同步执行**：先执行 `WithOnConfigChange`，再按注册顺序执行 `OnConfigChange` 注册的回调；此前注册的回调各自在独立 goroutine 中执行，相邻两次重载的回调可能乱序
+- **再次调用 `Init` 时保留已注册的回调**：旧实例上通过 `OnConfigChange` 注册的回调迁移到新实例；此前这些回调随旧实例关闭而静默失效
 
 - **`Sub()` 返回的子配置沿用父实例的 `WithTagName`**：此前子配置的 `Unmarshal` 等方法会退回 mapstructure 标签，按 json/toml 标签定义的字段解析为零值
 - **`GetInstance()` 自动初始化失败时立即 panic 并携带原始错误**：此前错误被忽略、返回 nil，后续调用以无错误信息的空指针 panic
@@ -30,7 +33,8 @@
 - 主模块最低 Go 版本由 1.14 提升至 1.21，Apollo 子模块由 1.20 提升至 1.21
 - YAML 改按 1.2 规范解析：`yes`、`no`、`on`、`off` 读为字符串，`GetBool` 返回 false，需改写为 `true`、`false`
 - `Sub()` 返回的子配置沿用父实例的环境变量设置（`AutomaticEnv`、前缀与替换规则），此前子配置不读取环境变量
-- `OnConfigChange` 回调参数类型来自 fsnotify，引用方的 fsnotify 随之升级至 v1.8.0
+- `WithOnConfigChange`、`OnConfigChange`（实例方法与包级函数）的回调参数由 `fsnotify.Event` 改为 `gconf.ChangeEvent`，需将回调改为 `func(e gconf.ChangeEvent)`，原 `e.Name` 改用 `e.File`，并按 `e.Err` 区分成功与失败；公开 API 不再引用 fsnotify 类型
+- 回调改为在监听 goroutine 中同步执行，耗时回调会推迟下一次重载，需自行启动 goroutine 处理耗时操作
 
 ## [1.1.0] - 2026-10-30
 
