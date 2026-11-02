@@ -381,3 +381,29 @@ func TestStorePruneLegacyHistory(t *testing.T) {
 		t.Fatalf("expected only current version, got %v", files)
 	}
 }
+
+// TestWriteFileSync 写入后内容完整，覆盖已有文件时截断旧内容
+func TestWriteFileSync(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "f")
+	if err := writeFileSync(path, []byte("longer old content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileSync(path, []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "new" {
+		t.Fatalf("got %q", data)
+	}
+}
+
+// TestWriteFileSyncOpenError 无法打开文件时返回错误
+func TestWriteFileSyncOpenError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing", "f")
+	if err := writeFileSync(path, []byte("x"), 0o644); err == nil {
+		t.Fatal("expected error for missing directory")
+	}
+}

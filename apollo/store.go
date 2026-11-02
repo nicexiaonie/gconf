@@ -154,10 +154,7 @@ func (f *fileStore) Publish(ns string, format Format, data []byte, releaseKey st
 	base := strings.TrimSuffix(filepath.Base(f.stablePath(ns, format)), filepath.Ext(f.stablePath(ns, format)))
 	snapFile := fmt.Sprintf("%s-%s.%s", base, hash, formatStr)
 	snapPath := filepath.Join(snapDir, snapFile)
-	if err := os.WriteFile(snapPath, data, 0o644); err != nil {
-		return err
-	}
-	if err := fsyncFile(snapPath); err != nil {
+	if err := writeFileSync(snapPath, data, 0o644); err != nil {
 		return err
 	}
 
@@ -246,10 +243,7 @@ func (f *fileStore) writeIndex(ns string, format Format, idx nsIndex) error {
 	}
 	path := f.indexPath(ns, format)
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	if err := fsyncFile(tmp); err != nil {
+	if err := writeFileSync(tmp, data, 0o644); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -263,13 +257,22 @@ func hashBytes(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func fsyncFile(path string) error {
-	f, err := os.Open(path)
+// writeFileSync 写入文件并在同一个可写句柄上刷盘后关闭，写入、刷盘、关闭任一步失败都返回错误。
+// 刷盘必须使用可写句柄：Windows 拒绝对只读句柄刷盘。
+func writeFileSync(path string, data []byte, perm os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	return f.Sync()
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func fsyncDir(path string) error {
